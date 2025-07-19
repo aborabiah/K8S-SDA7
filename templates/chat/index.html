@@ -433,26 +433,46 @@
                     
                     <!-- Terminal Input -->
                     <div class="glass-effect border-t border-terminal-border/30 p-3 sm:p-4 lg:p-6">
-                        <form id="terminal-form" class="flex items-center gap-2 sm:gap-4">
-                            <span class="text-terminal-accent font-mono font-semibold text-xs sm:text-sm truncate flex-shrink-0">user@k8s-terminal:~$</span>
+                        <!-- Input Form -->
+                        <form id="terminal-form" class="flex items-center gap-2 sm:gap-4 relative">
+                            <!-- Terminal Mode Prompt -->
+                            <span id="terminal-prompt" class="text-terminal-accent font-mono font-semibold text-xs sm:text-sm truncate flex-shrink-0">user@k8s-terminal:~$</span>
+                            
                             <input 
                                 type="text" 
                                 id="terminal-input"
-                                class="flex-1 bg-transparent text-terminal-text font-mono outline-none caret-terminal-accent border-none placeholder-terminal-text/40 text-xs sm:text-sm min-w-0"
+                                class="flex-1 bg-transparent text-terminal-text font-mono outline-none caret-terminal-accent border-none placeholder-terminal-text/40 text-xs sm:text-sm min-w-0 transition-all duration-300"
                                 placeholder="Enter your command..."
                                 disabled
                             >
+                            
+                            <!-- AI Assistant Button -->
+                            <button type="button" id="ai-assist-btn" class="hidden flex items-center gap-2 px-3 py-2 bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/30 hover:border-purple-500/50 rounded-lg text-xs text-purple-200 transition-all duration-200 hover:scale-105 flex-shrink-0" title="Ask AI Assistant">
+                                <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                                </svg>
+                                <span>AI</span>
+                            </button>
+                            
                             <button type="submit" id="terminal-submit" class="hidden"></button>
                         </form>
-                        <div class="mt-2 sm:mt-3 text-xs text-terminal-text/60 flex flex-wrap gap-2 sm:gap-4">
-                            <span class="flex items-center gap-1">
+                        
+                        <!-- Help Text -->
+                        <div class="mt-2 sm:mt-3 text-xs text-terminal-text/60 flex flex-wrap gap-2 sm:gap-4 transition-all duration-300">
+                            <span class="flex items-center gap-1" id="help-arrow-keys">
                                 <span class="text-terminal-accent">↑↓</span> <span class="hidden sm:inline">Command</span> History
                             </span>
-                            <span class="flex items-center gap-1">
+                            <span class="flex items-center gap-1" id="help-interrupt">
                                 <span class="text-terminal-accent">Ctrl+C</span> Interrupt
                             </span>
-                            <span class="flex items-center gap-1 hidden sm:flex">
+                            <span class="flex items-center gap-1 hidden sm:flex" id="help-editing">
                                 <span class="text-terminal-accent">vim/nano</span> Text editing
+                            </span>
+                            <span class="flex items-center gap-1" id="help-ai-trigger">
+                                <span class="text-purple-400">/</span> AI Assistant
+                            </span>
+                            <span class="hidden items-center gap-1" id="help-ai-mode">
+                                <span class="text-purple-400">Esc</span> Exit AI mode
                             </span>
                         </div>
                     </div>

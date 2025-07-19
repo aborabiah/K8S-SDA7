@@ -27,6 +27,11 @@ let historyIndex = 0;
 let currentCommandAbortController = null;
 let connectionCheckInterval = null;
 
+// AI Assistant State
+let currentAiRequest = null;
+let isInAiMode = false;
+let aiSessionStarted = false;
+
 // IMMEDIATE HOMEPAGE CHECK - Hide scroll button if no textbox
 function hideScrollButtonOnHomepage() {
     const textbox = document.getElementById('terminal-input');
@@ -1057,7 +1062,7 @@ async function executeCommand(command, silent = false) {
     }
 }
 
-function appendTerminalMessage(type, content, exitCode = null) {
+function appendTerminalMessage(type, content, exitCode = null, commands = [], followUpQuestions = []) {
     const messageDiv = document.createElement('div');
     messageDiv.className = 'terminal-message mb-4';
     
@@ -1089,7 +1094,114 @@ function appendTerminalMessage(type, content, exitCode = null) {
             `;
             break;
         
-
+        case 'ai-question':
+            messageHTML = `
+                <div class="text-purple-300 font-mono flex items-start gap-2">
+                    <svg class="w-4 h-4 mt-0.5 text-purple-400 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                    </svg>
+                    <span>${escapeHtml(content)}</span>
+                </div>
+            `;
+            break;
+            
+        case 'ai-thinking':
+            messageHTML = `
+                <div class="text-purple-300 font-mono flex items-center gap-2">
+                    <div class="flex space-x-1">
+                        <div class="w-2 h-2 bg-purple-400 rounded-full animate-bounce"></div>
+                        <div class="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style="animation-delay: 0.1s"></div>
+                        <div class="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style="animation-delay: 0.2s"></div>
+                    </div>
+                    <span>${escapeHtml(content)}</span>
+                </div>
+            `;
+            break;
+            
+        case 'ai-welcome':
+        case 'ai-mode-activated':
+        case 'ai-mode-deactivated':
+        case 'ai-waiting':
+            messageHTML = `
+                <div class="bg-gradient-to-r from-purple-900/30 to-blue-900/30 border border-purple-500/40 rounded-xl p-4 font-mono mb-2">
+                    <div class="text-purple-200 text-sm whitespace-pre-wrap">${formatAiResponse(content)}</div>
+                </div>
+            `;
+            break;
+            
+        case 'ai-user-message':
+            messageHTML = `
+                <div class="flex justify-end mb-2">
+                    <div class="bg-terminal-accent/20 border border-terminal-accent/30 rounded-xl px-4 py-2 max-w-2xl">
+                        <div class="flex items-start gap-2">
+                            <svg class="w-4 h-4 mt-0.5 text-terminal-accent flex-shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                            </svg>
+                            <span class="text-terminal-text text-sm font-medium">You:</span>
+                        </div>
+                        <div class="text-terminal-text text-sm mt-1 pl-6">${escapeHtml(content)}</div>
+                    </div>
+                </div>
+            `;
+            break;
+        
+        case 'ai-response':
+            let formattedContent = formatAiResponse(content);
+            let commandsHTML = '';
+            let followUpHTML = '';
+            
+            if (commands && commands.length > 0) {
+                commandsHTML = `
+                    <div class="mt-3 pt-3 border-t border-purple-500/20">
+                        <p class="text-xs text-purple-300/70 mb-2">💡 Suggested commands:</p>
+                        <div class="flex flex-wrap gap-2">
+                            ${commands.map(command => `
+                                <button class="ai-command-btn inline-flex items-center gap-2 px-3 py-1.5 bg-terminal-accent/20 hover:bg-terminal-accent/30 border border-terminal-accent/30 rounded-lg text-xs text-terminal-accent transition-all duration-200 hover:scale-105 font-mono" 
+                                        data-command="${escapeHtml(command)}">
+                                    <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" />
+                                    </svg>
+                                    ${escapeHtml(command)}
+                                </button>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+            
+            if (followUpQuestions && followUpQuestions.length > 0) {
+                followUpHTML = `
+                    <div class="mt-3 pt-3 border-t border-yellow-500/20">
+                        <p class="text-xs text-yellow-300/70 mb-2">❓ Follow-up questions:</p>
+                        <div class="space-y-2">
+                            ${followUpQuestions.map(question => `
+                                <div class="flex items-start gap-2 text-yellow-200 text-sm">
+                                    <span class="text-yellow-400 mt-1">•</span>
+                                    <span>${escapeHtml(question)}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                        <div class="mt-2 text-xs text-yellow-300/70 italic">
+                            💬 The AI is asking for more details. Please respond with additional information.
+                        </div>
+                    </div>
+                `;
+            }
+            
+            messageHTML = `
+                <div class="bg-purple-900/20 border border-purple-500/30 rounded-xl p-4 font-mono mb-2">
+                    <div class="flex items-start gap-2 mb-3">
+                        <svg class="w-5 h-5 mt-0.5 text-purple-400 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                        </svg>
+                        <span class="text-purple-300 font-semibold">AI Assistant</span>
+                    </div>
+                    <div class="text-purple-100 text-sm whitespace-pre-wrap pl-7">${formattedContent}</div>
+                    ${commandsHTML}
+                    ${followUpHTML}
+                </div>
+            `;
+            break;
         
         case 'info':
             messageHTML = `
@@ -1141,6 +1253,33 @@ function appendTerminalMessage(type, content, exitCode = null) {
             updateHistoryButtonVisibility();
         }
     }, 50);
+    
+    return messageDiv;
+}
+
+function formatAiResponse(content) {
+    if (!content) return '';
+    
+    // Simple markdown-like formatting
+    let formatted = escapeHtml(content);
+    
+    // Format code blocks
+    formatted = formatted.replace(/```(\w*)\n?([\s\S]*?)```/g, (match, lang, code) => {
+        return `<div class="bg-terminal-bg/50 border border-terminal-border/30 rounded-lg p-3 my-2 font-mono text-sm overflow-x-auto">
+            <pre class="text-terminal-text/90">${code.trim()}</pre>
+        </div>`;
+    });
+    
+    // Format inline code
+    formatted = formatted.replace(/`([^`]+)`/g, '<code class="bg-terminal-bg/30 px-1 py-0.5 rounded text-purple-200 font-mono text-xs">$1</code>');
+    
+    // Format bold text
+    formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<strong class="font-semibold text-purple-200">$1</strong>');
+    
+    // Format bullet points
+    formatted = formatted.replace(/^• (.+)$/gm, '<div class="flex items-start gap-2"><span class="text-purple-400 mt-1">•</span><span>$1</span></div>');
+    
+    return formatted;
 }
 
 async function updateCurrentPath() {
@@ -1177,8 +1316,14 @@ async function switchToSession(sessionId, clusterName, clusterId) {
         terminalMessages.innerHTML = '';
     }
     
-    // Enable terminal input
+    // Enable terminal input and show AI button
     setTerminalInputState(true);
+    
+    // Show AI assistance button
+    const aiAssistBtn = document.getElementById('ai-assist-btn');
+    if (aiAssistBtn) {
+        aiAssistBtn.classList.remove('hidden');
+    }
     
     // Hide history button initially (will be shown by loadCommandHistory if needed)
     const sessionHistoryBtn = document.getElementById('history-toggle-btn');
@@ -1237,8 +1382,8 @@ async function switchToSession(sessionId, clusterName, clusterId) {
     // Start connection monitoring for the new session
     startConnectionMonitoring();
     
-            // Load command history first (this will populate old history and show toggle button)
-        await loadCommandHistory(sessionId);
+    // Load command history first (this will populate old history and show toggle button)
+    await loadCommandHistory(sessionId);
         
         // FORCE HIDE: Ensure button is hidden unless there's actual user commands
         const forceHideBtn = document.getElementById('history-toggle-btn');
@@ -1508,29 +1653,54 @@ function autoResizeTextarea() {
 }
 
 function handleKeydown(e) {
+  // Handle AI mode activation with "/"
+  if (!isInAiMode && e.key === '/' && terminalInput.value === '') {
+    e.preventDefault();
+    enterAiMode();
+    return;
+  }
+  
+  // Handle AI mode exit with Escape
+  if (isInAiMode && e.key === 'Escape') {
+    e.preventDefault();
+    exitAiMode();
+    return;
+  }
+  
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-        terminalForm.dispatchEvent(new Event('submit'));
-    } else if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
-        e.preventDefault();
-        // Send interrupt signal
-        interruptCurrentCommand();
-    } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (historyIndex > 0) {
-            historyIndex--;
-            terminalInput.value = commandHistory[historyIndex] || '';
-        }
-    } else if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        if (historyIndex < commandHistory.length - 1) {
-            historyIndex++;
-            terminalInput.value = commandHistory[historyIndex] || '';
-  } else {
-            historyIndex = commandHistory.length;
-            terminalInput.value = '';
+    if (isInAiMode) {
+      handleAiConversation();
+    } else {
+      terminalForm.dispatchEvent(new Event('submit'));
+    }
+  } else if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
+    e.preventDefault();
+    if (currentAiRequest) {
+      // Cancel AI request
+      currentAiRequest.abort();
+      currentAiRequest = null;
+      appendTerminalMessage('info', 'AI request cancelled.');
+    } else {
+      // Send interrupt signal
+      interruptCurrentCommand();
+    }
+  } else if (!isInAiMode && e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (historyIndex > 0) {
+      historyIndex--;
+      terminalInput.value = commandHistory[historyIndex] || '';
+    }
+  } else if (!isInAiMode && e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (historyIndex < commandHistory.length - 1) {
+      historyIndex++;
+      terminalInput.value = commandHistory[historyIndex] || '';
+    } else {
+      historyIndex = commandHistory.length;
+      terminalInput.value = '';
+    }
   }
-}
 }
 
 function toggleSidebar() {
@@ -1568,6 +1738,523 @@ function getCsrfToken() {
     
     return cookieValue || '';
 }
+
+// ========================
+// Interactive AI Assistant Functions
+// ========================
+
+async function enterAiMode() {
+    if (!currentSessionId) {
+        showErrorMessage('Please select a cluster first');
+        return;
+    }
+    
+    // Check if session is already active
+    const sessionActive = await checkAiSessionStatus();
+    if (sessionActive) {
+        isInAiMode = true;
+        aiSessionStarted = true;
+        appendTerminalMessage('info', '🔄 **AI session already active** - Continue chatting!');
+        
+        // Update UI to AI mode
+        const terminalInput = document.getElementById('terminal-input');
+        const terminalPrompt = document.getElementById('terminal-prompt');
+        const helpAiTrigger = document.getElementById('help-ai-trigger');
+        const helpAiMode = document.getElementById('help-ai-mode');
+        
+        if (terminalInput) {
+            terminalInput.placeholder = 'Chat with kubectl-ai... (Press Esc to exit AI mode)';
+            terminalInput.className = terminalInput.className.replace('caret-terminal-accent', 'caret-purple-400');
+            terminalInput.style.borderLeft = '3px solid #a855f7';
+            terminalInput.focus();
+        }
+        
+        if (terminalPrompt) {
+            terminalPrompt.innerHTML = `
+                <div class="flex items-center gap-2">
+                    <svg class="w-4 h-4 text-purple-400 animate-pulse" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                    </svg>
+                    <span class="text-purple-400">kubectl-ai:</span>
+                </div>
+            `;
+        }
+        
+        if (helpAiTrigger) helpAiTrigger.classList.add('hidden');
+        if (helpAiMode) helpAiMode.classList.remove('hidden');
+        
+        return;
+    }
+    
+    // Show starting message
+    const startingMessage = appendTerminalMessage('ai-thinking', '🚀 Starting interactive kubectl-ai session...');
+    
+    try {
+        // Start persistent kubectl-ai session
+        const response = await fetch(`/terminal/${currentSessionId}/ai-start/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
+            }
+        });
+        
+        const data = await response.json();
+        
+        // Remove starting message
+        if (startingMessage && startingMessage.parentNode) {
+            startingMessage.parentNode.removeChild(startingMessage);
+        }
+        
+        if (!data.success) {
+            appendTerminalMessage('error', `🚨 **Failed to start persistent kubectl-ai session:** ${data.error}`);
+            
+            // Add helpful suggestion
+            setTimeout(() => {
+                appendTerminalMessage('info', '💡 **Troubleshooting:** Type `debug-ai` to check kubectl-ai setup and GEMINI_API_KEY');
+            }, 500);
+            
+            // Reset input styling since session failed
+            if (terminalInput) {
+                terminalInput.placeholder = 'Enter your command...';
+                terminalInput.className = terminalInput.className.replace('caret-purple-400', 'caret-terminal-accent');
+                terminalInput.style.borderLeft = '';
+            }
+            
+            if (terminalPrompt) {
+                terminalPrompt.innerHTML = 'user@k8s-terminal:~$';
+            }
+            
+            return;
+        }
+        
+        isInAiMode = true;
+        aiSessionStarted = true;
+        
+        // Update input styling and prompt
+        const terminalInput = document.getElementById('terminal-input');
+        const terminalPrompt = document.getElementById('terminal-prompt');
+        const helpAiTrigger = document.getElementById('help-ai-trigger');
+        const helpAiMode = document.getElementById('help-ai-mode');
+        
+        if (terminalInput) {
+            terminalInput.placeholder = 'Chat with kubectl-ai... (Press Esc to exit AI mode)';
+            terminalInput.className = terminalInput.className.replace('caret-terminal-accent', 'caret-purple-400');
+            terminalInput.style.borderLeft = '3px solid #a855f7';
+            terminalInput.focus();
+        }
+        
+        if (terminalPrompt) {
+            terminalPrompt.innerHTML = `
+                <div class="flex items-center gap-2">
+                    <svg class="w-4 h-4 text-purple-400 animate-pulse" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                    </svg>
+                    <span class="text-purple-400">kubectl-ai:</span>
+                </div>
+            `;
+        }
+        
+        // Update help text
+        if (helpAiTrigger) helpAiTrigger.classList.add('hidden');
+        if (helpAiMode) helpAiMode.classList.remove('hidden');
+        
+        // Show initial response from kubectl-ai or default welcome
+        if (data.initial_response) {
+            appendTerminalMessage('ai-welcome', `🚀 **PERSISTENT kubectl-ai SESSION STARTED**
+
+${data.initial_response}
+
+*You're now in a persistent kubectl-ai session - just like running kubectl-ai in your terminal!*
+*Ask questions naturally or type kubectl commands directly.* 🚀`);
+        } else {
+            appendTerminalMessage('ai-welcome', `🚀 **PERSISTENT kubectl-ai SESSION**: Complete kubectl access to your cluster!
+
+**You can now:**
+• **Direct kubectl commands**: \`kubectl get pods\`
+• **Natural language**: "How many pods are running?"
+• **Cluster exploration**: "Show me all services"
+• **Any kubectl operation**: \`kubectl describe pod <name>\`
+
+**Examples:**
+• \`kubectl get pods -o wide\`
+• \`kubectl get nodes\`
+• \`kubectl logs <pod-name>\`
+• "What's running in my cluster?"
+• "Show me deployment status"
+
+*Type your first question - the session is ready!* 🚀`);
+        }
+        
+    } catch (error) {
+        // Remove starting message
+        if (startingMessage && startingMessage.parentNode) {
+            startingMessage.parentNode.removeChild(startingMessage);
+        }
+        
+        appendTerminalMessage('error', `🌐 **Network Error:** Failed to start AI session - ${error.message}`);
+    }
+}
+
+async function exitAiMode() {
+    isInAiMode = false;
+    aiSessionStarted = false;
+    
+    // Show stopping message
+    const stoppingMessage = appendTerminalMessage('ai-thinking', '🛑 Stopping interactive kubectl-ai session...');
+    
+    try {
+        // Stop interactive AI session
+        await fetch(`/terminal/${currentSessionId}/ai-stop/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
+            }
+        });
+        
+        // Remove stopping message
+        if (stoppingMessage && stoppingMessage.parentNode) {
+            stoppingMessage.parentNode.removeChild(stoppingMessage);
+        }
+        
+    } catch (error) {
+        console.error('Error stopping AI session:', error);
+        // Remove stopping message even if there's an error
+        if (stoppingMessage && stoppingMessage.parentNode) {
+            stoppingMessage.parentNode.removeChild(stoppingMessage);
+        }
+    }
+    
+    // Reset input styling and prompt
+    const terminalInput = document.getElementById('terminal-input');
+    const terminalPrompt = document.getElementById('terminal-prompt');
+    const helpAiTrigger = document.getElementById('help-ai-trigger');
+    const helpAiMode = document.getElementById('help-ai-mode');
+    
+    if (terminalInput) {
+        terminalInput.placeholder = 'Enter your command...';
+        terminalInput.className = terminalInput.className.replace('caret-purple-400', 'caret-terminal-accent');
+        terminalInput.style.borderLeft = '';
+        terminalInput.value = '';
+        terminalInput.focus();
+    }
+    
+    if (terminalPrompt) {
+        terminalPrompt.innerHTML = 'user@k8s-terminal:~$';
+    }
+    
+    // Update help text
+    if (helpAiTrigger) helpAiTrigger.classList.remove('hidden');
+    if (helpAiMode) helpAiMode.classList.add('hidden');
+    
+    // Cancel any ongoing AI request
+    if (currentAiRequest) {
+        currentAiRequest.abort();
+        currentAiRequest = null;
+    }
+    
+    appendTerminalMessage('ai-mode-deactivated', '🔚 **Interactive kubectl-ai Session Ended** - Back to terminal mode');
+}
+
+async function handleAiConversation() {
+    const message = terminalInput.value.trim();
+    if (!message) return;
+    
+    // Check if we're actually in AI mode and session is started
+    if (!isInAiMode || !aiSessionStarted) {
+        appendTerminalMessage('error', '🚨 **Error:** AI mode is not properly active. Press / to start AI mode.');
+        return;
+    }
+    
+    // Verify session is still active on backend
+    const sessionActive = await checkAiSessionStatus();
+    if (!sessionActive) {
+        appendTerminalMessage('error', '🚨 **Session Lost:** AI session is no longer active. Please restart AI mode (Press Esc, then /).');
+        // Reset AI mode state
+        isInAiMode = false;
+        aiSessionStarted = false;
+        return;
+    }
+    
+    // Show user message in clean format
+    appendTerminalMessage('ai-user-message', message);
+    
+    // Clear input
+    terminalInput.value = '';
+    
+    // Show thinking indicator
+    const thinkingMessage = appendTerminalMessage('ai-thinking', '🤔 AI is thinking...');
+    
+    try {
+        // Create abort controller for this request
+        currentAiRequest = new AbortController();
+        
+        // Send message directly to interactive kubectl-ai session
+        const response = await fetch(`/terminal/${currentSessionId}/ai-assistance/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
+            },
+            body: JSON.stringify({ message: message }),
+            signal: currentAiRequest.signal
+        });
+        
+        const data = await response.json();
+        
+        // Remove thinking indicator
+        if (thinkingMessage && thinkingMessage.parentNode) {
+            thinkingMessage.parentNode.removeChild(thinkingMessage);
+        }
+        
+        if (data.success) {
+            // Display clean AI response
+            appendTerminalMessage('ai-response', data.response, 0, data.commands);
+            
+            // Show continuation prompt after a brief delay
+            setTimeout(() => {
+                appendTerminalMessage('ai-waiting', '💬 **AI**: Is there anything else you\'d like to know?');
+            }, 500);
+        } else {
+            appendTerminalMessage('error', `🚨 **AI Error:** ${data.error}`);
+            
+            // If the session has ended, reset state and suggest restarting
+            if (data.error.includes('No active AI session') || data.error.includes('Session may have ended')) {
+                isInAiMode = false;
+                aiSessionStarted = false;
+                
+                // Reset UI to normal terminal mode
+                const terminalInput = document.getElementById('terminal-input');
+                const terminalPrompt = document.getElementById('terminal-prompt');
+                const helpAiTrigger = document.getElementById('help-ai-trigger');
+                const helpAiMode = document.getElementById('help-ai-mode');
+                
+                if (terminalInput) {
+                    terminalInput.placeholder = 'Enter your command...';
+                    terminalInput.className = terminalInput.className.replace('caret-purple-400', 'caret-terminal-accent');
+                    terminalInput.style.borderLeft = '';
+                }
+                
+                if (terminalPrompt) {
+                    terminalPrompt.innerHTML = 'user@k8s-terminal:~$';
+                }
+                
+                if (helpAiTrigger) helpAiTrigger.classList.remove('hidden');
+                if (helpAiMode) helpAiMode.classList.add('hidden');
+                
+                setTimeout(() => {
+                    appendTerminalMessage('info', '💡 **Session Ended:** Press / to start a new AI session');
+                }, 500);
+            }
+        }
+        
+    } catch (error) {
+        // Remove thinking indicator
+        if (thinkingMessage && thinkingMessage.parentNode) {
+            thinkingMessage.parentNode.removeChild(thinkingMessage);
+        }
+        
+        if (error.name !== 'AbortError') {
+            appendTerminalMessage('error', `🌐 **Network Error:** ${error.message}`);
+        }
+    } finally {
+        currentAiRequest = null;
+    }
+}
+
+// Check if AI session is actually active on the backend
+async function checkAiSessionStatus() {
+    if (!currentSessionId) return false;
+    
+    try {
+        const response = await fetch(`/terminal/${currentSessionId}/ai-check/`, {
+            method: 'GET',
+            headers: {
+                'X-CSRFToken': getCsrfToken()
+            }
+        });
+        
+        const data = await response.json();
+        return data.success && data.is_active;
+    } catch (error) {
+        console.error('Error checking AI session status:', error);
+        return false;
+    }
+}
+
+// Debug kubectl-ai installation and setup
+async function debugKubectlAi() {
+    if (!currentSessionId) {
+        appendTerminalMessage('error', '🚨 **Error:** Please select a cluster first');
+        return;
+    }
+    
+    const debugMessage = appendTerminalMessage('ai-thinking', '🔍 Debugging kubectl-ai installation...');
+    
+    try {
+        const response = await fetch(`/terminal/${currentSessionId}/ai-debug/`, {
+            method: 'GET',
+            headers: {
+                'X-CSRFToken': getCsrfToken()
+            }
+        });
+        
+        const data = await response.json();
+        
+        // Remove debug message
+        if (debugMessage && debugMessage.parentNode) {
+            debugMessage.parentNode.removeChild(debugMessage);
+        }
+        
+        if (data.success) {
+            let debugOutput = '🔍 **kubectl-ai Debug Information**\n\n';
+            
+            const debug = data.debug_info;
+            
+            // kubectl-ai location
+            if (debug.kubectl_ai_which) {
+                if (debug.kubectl_ai_which.returncode === 0) {
+                    debugOutput += `✅ **kubectl-ai found at:** ${debug.kubectl_ai_which.stdout}\n\n`;
+                } else {
+                    debugOutput += `❌ **kubectl-ai not found in PATH**\n`;
+                    debugOutput += `Error: ${debug.kubectl_ai_which.stderr || 'Command not found'}\n\n`;
+                }
+            }
+            
+            // kubectl-ai version
+            if (debug.kubectl_ai_version) {
+                if (debug.kubectl_ai_version.returncode === 0) {
+                    debugOutput += `📦 **kubectl-ai version:** ${debug.kubectl_ai_version.stdout}\n\n`;
+                } else {
+                    debugOutput += `❌ **kubectl-ai version check failed**\n`;
+                    debugOutput += `Error: ${debug.kubectl_ai_version.stderr || 'Version check failed'}\n\n`;
+                }
+            }
+            
+            // Ollama status
+            if (debug.ollama_status) {
+                if (debug.ollama_status.returncode === 0) {
+                    debugOutput += `✅ **Ollama is running**\n\n`;
+                } else {
+                    debugOutput += `❌ **Ollama not responding**\n`;
+                    debugOutput += `Error: ${debug.ollama_status.stderr || 'Connection failed'}\n\n`;
+                }
+            }
+            
+            // kubectl-ai test
+            if (debug.kubectl_ai_test) {
+                if (debug.kubectl_ai_test.returncode === 0) {
+                    debugOutput += `✅ **kubectl-ai test successful**\n`;
+                    debugOutput += `Output: ${debug.kubectl_ai_test.stdout}\n\n`;
+                } else {
+                    debugOutput += `❌ **kubectl-ai test failed**\n`;
+                    debugOutput += `Error: ${debug.kubectl_ai_test.stderr}\n\n`;
+                }
+            }
+            
+            // API Keys status
+            if (debug.api_keys) {
+                debugOutput += `🔑 **API Keys Status:**\n`;
+                Object.entries(debug.api_keys).forEach(([key, status]) => {
+                    const statusIcon = status.includes('Set') ? '✅' : '❌';
+                    debugOutput += `${statusIcon} ${key}: ${status}\n`;
+                });
+                debugOutput += `\n`;
+            }
+            
+            // System PATH
+            debugOutput += `🛠️ **System PATH:**\n${debug.PATH}\n\n`;
+            
+            // Recommendations
+            debugOutput += `💡 **Troubleshooting Steps:**\n`;
+            
+            if (debug.kubectl_ai_which && debug.kubectl_ai_which.returncode !== 0) {
+                debugOutput += `1. Install kubectl-ai: Visit https://github.com/sozercan/kubectl-ai\n`;
+            }
+            
+            if (debug.api_keys) {
+                const hasApiKey = Object.values(debug.api_keys).some(status => status.includes('Set'));
+                if (!hasApiKey) {
+                    debugOutput += `2. Set up API key: Configure GEMINI_API_KEY, OPENAI_API_KEY, or other provider\n`;
+                }
+            }
+            
+            if (debug.kubectl_ai_test && debug.kubectl_ai_test.returncode !== 0) {
+                debugOutput += `3. Check kubectl-ai configuration and AI provider setup\n`;
+                debugOutput += `4. Verify your API key is valid and has proper permissions\n`;
+            }
+            
+            appendTerminalMessage('info', debugOutput);
+        } else {
+            appendTerminalMessage('error', `🚨 **Debug Error:** ${data.error}`);
+        }
+        
+    } catch (error) {
+        // Remove debug message
+        if (debugMessage && debugMessage.parentNode) {
+            debugMessage.parentNode.removeChild(debugMessage);
+        }
+        
+        appendTerminalMessage('error', `🌐 **Network Error:** ${error.message}`);
+    }
+}
+
+// Legacy function for AI button (still useful for quick access)
+async function handleAiAssistance() {
+    if (!isInAiMode) {
+        // Start AI mode first
+        await enterAiMode();
+        // Small delay to let the session start, then process current input if any
+        setTimeout(async () => {
+            const terminalInput = document.getElementById('terminal-input');
+            if (terminalInput && terminalInput.value.trim()) {
+                // Double-check session is active before sending
+                const sessionActive = await checkAiSessionStatus();
+                if (sessionActive) {
+                    handleAiConversation();
+                } else {
+                    appendTerminalMessage('error', '🚨 **Session Error:** AI session is not active. Please try restarting AI mode.');
+                }
+            }
+        }, 1000); // Longer delay to allow AI session to start
+    } else {
+        // Already in AI mode, just send the message
+        handleAiConversation();
+    }
+}
+
+// ========================
+// AI Assistant Event Listeners
+// ========================
+
+// AI assistance button
+document.addEventListener('click', (e) => {
+    if (e.target.closest('#ai-assist-btn')) {
+        handleAiAssistance();
+    }
+});
+
+// AI command execution buttons
+document.addEventListener('click', (e) => {
+    if (e.target.closest('.ai-command-btn')) {
+        const button = e.target.closest('.ai-command-btn');
+        const command = button.dataset.command;
+        
+        if (command) {
+            // Set the command in the input and execute it
+            const terminalInput = document.getElementById('terminal-input');
+            if (terminalInput) {
+                terminalInput.value = command;
+                // Trigger the terminal form submission
+                const terminalForm = document.getElementById('terminal-form');
+                if (terminalForm) {
+                    terminalForm.dispatchEvent(new Event('submit'));
+                }
+            }
+        }
+    }
+});
 
 // Connection status management
 function updateConnectionStatus(status, isConnected) {
