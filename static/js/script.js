@@ -32,6 +32,14 @@ function hideScrollButtonOnHomepage() {
     const textbox = document.getElementById('terminal-input');
     const container = document.querySelector('.scroll-button-container');
     const scrollButton = document.getElementById('smart-scroll-btn');
+    const historyToggleBtn = document.getElementById('history-toggle-btn');
+    
+    // Always hide history button on page load until verified
+    if (historyToggleBtn) {
+        historyToggleBtn.classList.add('hidden');
+        historyToggleBtn.style.setProperty('display', 'none', 'important');
+        console.log('🚫 PAGE LOAD: History button hidden until verified');
+    }
     
     if (!textbox && container) {
         // Homepage detected - force hide everything
@@ -49,8 +57,27 @@ function hideScrollButtonOnHomepage() {
 // Run immediately
 hideScrollButtonOnHomepage();
 
+// IMMEDIATE HISTORY BUTTON HIDE - CEO GPU Discount Mode
+(function forceHideHistoryImmediately() {
+    const histBtn = document.getElementById('history-toggle-btn');
+    if (histBtn) {
+        histBtn.classList.add('hidden');
+        histBtn.style.setProperty('display', 'none', 'important');
+        console.log('🎯 CEO MODE: History button force hidden on load');
+    }
+})();
+
 // Run again when DOM is fully loaded
-document.addEventListener('DOMContentLoaded', hideScrollButtonOnHomepage);
+document.addEventListener('DOMContentLoaded', function() {
+    hideScrollButtonOnHomepage();
+    // Double-check history button hiding
+    const histBtn = document.getElementById('history-toggle-btn');
+    if (histBtn) {
+        histBtn.classList.add('hidden');
+        histBtn.style.setProperty('display', 'none', 'important');
+        console.log('🎯 DOM LOADED: History button force hidden');
+    }
+});
 
 // Notification system
 function showNotification(message, type = 'error', duration = 4000) {
@@ -995,6 +1022,8 @@ async function executeCommand(command, silent = false) {
                     } else {
                         terminalMessages.innerHTML = '';
                     }
+                    // Update history button after clearing (history may still exist)
+                    updateHistoryButtonVisibility();
                 } else if (data.output.trim()) {
                     appendTerminalMessage('output', data.output, data.exit_code);
                 }
@@ -1097,10 +1126,19 @@ function appendTerminalMessage(type, content, exitCode = null) {
         window.smartScrollChecker();
     }
     
+    // Only update history button if this is actual command content, not system messages
+    if (type === 'command' || (type === 'output' && content.trim() && !content.includes('Connected to') && !content.includes('Terminal ready'))) {
+        updateHistoryButtonVisibility();
+    }
+    
     // Double-check after DOM updates
     setTimeout(() => {
         if (window.smartScrollChecker) {
             window.smartScrollChecker();
+        }
+        // Only update history button for actual commands
+        if (type === 'command' || (type === 'output' && content.trim() && !content.includes('Connected to') && !content.includes('Terminal ready'))) {
+            updateHistoryButtonVisibility();
         }
     }, 50);
 }
@@ -1141,6 +1179,22 @@ async function switchToSession(sessionId, clusterName, clusterId) {
     
     // Enable terminal input
     setTerminalInputState(true);
+    
+    // Hide history button initially (will be shown by loadCommandHistory if needed)
+    const sessionHistoryBtn = document.getElementById('history-toggle-btn');
+    const oldHistory = document.getElementById('old-history');
+    
+    if (sessionHistoryBtn) {
+        sessionHistoryBtn.classList.add('hidden');
+        sessionHistoryBtn.style.setProperty('display', 'none', 'important');
+        console.log('🚫 Session start - hiding History button until verified');
+    }
+    
+    // Clear and hide any existing history content
+    if (oldHistory) {
+        oldHistory.innerHTML = '';
+        oldHistory.classList.add('hidden');
+    }
     
     // Initialize scroll button now that terminal is visible
     initializeSmartScroll();
@@ -1183,8 +1237,18 @@ async function switchToSession(sessionId, clusterName, clusterId) {
     // Start connection monitoring for the new session
     startConnectionMonitoring();
     
-    // Load command history first (this will populate old history and show toggle button)
-    await loadCommandHistory(sessionId);
+            // Load command history first (this will populate old history and show toggle button)
+        await loadCommandHistory(sessionId);
+        
+        // FORCE HIDE: Ensure button is hidden unless there's actual user commands
+        const forceHideBtn = document.getElementById('history-toggle-btn');
+        if (forceHideBtn) {
+            forceHideBtn.classList.add('hidden');
+            forceHideBtn.style.setProperty('display', 'none', 'important');
+        }
+        
+        // Update history button visibility after loading (strict check)
+        updateHistoryButtonVisibility();
     
     // Show welcome message in current session
     appendTerminalMessage('info', `Connected to ${clusterName}. Terminal ready.`);
@@ -1200,7 +1264,71 @@ async function switchToSession(sessionId, clusterName, clusterId) {
     }, 100);
 }
 
+// Function to check and update history button visibility
+function updateHistoryButtonVisibility() {
+    const historyToggleBtn = document.getElementById('history-toggle-btn');
+    const oldHistory = document.getElementById('old-history');
+    
+    if (!historyToggleBtn) return;
+    
+    // SUPER STRICT CHECK: Only show button if there's ACTUAL user command history
+    let hasActualUserCommands = false;
+    
+    if (oldHistory && oldHistory.children.length > 0) {
+        // Look for actual user commands (not system messages)
+        for (let i = 0; i < oldHistory.children.length; i++) {
+            const child = oldHistory.children[i];
+            const text = child.textContent || '';
+            
+            // Must be a terminal-message with user command prompt AND actual command
+            if (child.classList.contains('terminal-message') && 
+                text.includes('user@k8s-terminal:~$') &&
+                !text.includes('Connected to') &&
+                !text.includes('Terminal ready') &&
+                !text.includes('Type \'help\'') &&
+                !text.includes('--- Previous Session ---')) {
+                
+                // Extract command part after the prompt
+                const commandPart = text.split('user@k8s-terminal:~$')[1];
+                if (commandPart && commandPart.trim() && 
+                    commandPart.trim() !== '' &&
+                    commandPart.trim() !== 'clear' &&
+                    commandPart.trim() !== 'history') {
+                    hasActualUserCommands = true;
+                    break;
+                }
+            }
+        }
+    }
+    
+    // FORCE HIDE: Always hide unless we have verified user commands
+    if (hasActualUserCommands) {
+        historyToggleBtn.classList.remove('hidden');
+        historyToggleBtn.style.setProperty('display', 'flex', 'important');
+        console.log('✅ Actual user commands found - showing History button');
+    } else {
+        historyToggleBtn.classList.add('hidden');
+        historyToggleBtn.style.setProperty('display', 'none', 'important');
+        console.log('🚫 NO USER COMMANDS - History button HIDDEN');
+    }
+}
+
 async function loadCommandHistory(sessionId) {
+    const historyToggleBtn = document.getElementById('history-toggle-btn');
+    const oldHistory = document.getElementById('old-history');
+    
+    // Always start with button hidden
+    if (historyToggleBtn) {
+        historyToggleBtn.classList.add('hidden');
+        historyToggleBtn.style.setProperty('display', 'none', 'important');
+    }
+    
+    // Clear any existing history content
+    if (oldHistory) {
+        oldHistory.innerHTML = '';
+        oldHistory.classList.add('hidden');
+    }
+    
     try {
         const response = await fetch(`/terminal/${sessionId}/history/`);
         const data = await response.json();
@@ -1208,17 +1336,27 @@ async function loadCommandHistory(sessionId) {
         if (data.success && data.history.length > 0) {
             // Load previous commands into old history (hidden by default)
             const oldHistory = document.getElementById('old-history');
-            const historyToggleBtn = document.getElementById('history-toggle-btn');
             
             if (oldHistory && data.history.length > 0) {
+                // Clear any existing content first
+                oldHistory.innerHTML = '';
+                
                 // Add separator
                 const separatorDiv = document.createElement('div');
                 separatorDiv.className = 'text-blue-500 text-xs border-b border-blue-800/30 pb-2 mb-4';
                 separatorDiv.textContent = '--- Previous Session ---';
                 oldHistory.appendChild(separatorDiv);
                 
+                // Filter out empty or invalid commands
+                const validHistory = data.history.filter(cmd => 
+                    cmd.command && cmd.command.trim() !== '' && 
+                    cmd.command.trim() !== 'clear' && 
+                    cmd.command.trim() !== 'history'
+                );
+                
+                if (validHistory.length > 0) {
                 // Add previous commands to old history (last 10)
-                data.history.slice(-10).forEach(cmd => {
+                    validHistory.slice(-10).forEach(cmd => {
                     // Create command message
                     const cmdDiv = document.createElement('div');
                     cmdDiv.className = 'terminal-message mb-4';
@@ -1230,7 +1368,7 @@ async function loadCommandHistory(sessionId) {
                     oldHistory.appendChild(cmdDiv);
                     
                     // Add output if exists
-                    if (cmd.output.trim()) {
+                        if (cmd.output && cmd.output.trim()) {
                         const outputDiv = document.createElement('div');
                         outputDiv.className = 'terminal-message mb-4';
                         const exitClass = cmd.exit_code === 0 ? 'text-blue-200' : 'text-red-400';
@@ -1242,18 +1380,23 @@ async function loadCommandHistory(sessionId) {
                         oldHistory.appendChild(outputDiv);
                     }
                 });
-                
-                // Show history toggle button
-                if (historyToggleBtn) {
-                    historyToggleBtn.classList.remove('hidden');
                 }
                 
                 // Make sure old history starts hidden
                 oldHistory.classList.add('hidden');
             }
         }
+        
+        // Update button visibility based on actual content
+        updateHistoryButtonVisibility();
+        
     } catch (error) {
         console.error('Failed to load command history:', error);
+        // Hide button on error
+        if (historyToggleBtn) {
+            historyToggleBtn.classList.add('hidden');
+            historyToggleBtn.style.setProperty('display', 'none', 'important');
+        }
     }
 }
 
@@ -2651,9 +2794,52 @@ function initializeHistoryHandling() {
     };
     
     window.forceHideScrollButton = function() {
-        console.log('Force hiding scroll button');
-        scrollButton.classList.add('hidden');
-    };
+    console.log('Force hiding scroll button');
+    scrollButton.classList.add('hidden');
+};
+
+window.updateHistoryButton = function() {
+    console.log('Manually updating history button visibility');
+    updateHistoryButtonVisibility();
+};
+
+window.forceHideHistoryButton = function() {
+    console.log('Force hiding history button');
+    const historyToggleBtn = document.getElementById('history-toggle-btn');
+    if (historyToggleBtn) {
+        historyToggleBtn.classList.add('hidden');
+        historyToggleBtn.style.setProperty('display', 'none', 'important');
+        console.log('✅ History button force hidden');
+    }
+};
+
+window.checkHistoryContent = function() {
+    const oldHistory = document.getElementById('old-history');
+    const historyToggleBtn = document.getElementById('history-toggle-btn');
+    
+    console.log('📚 HISTORY DEBUG INFO:');
+    console.log('Old history element exists:', !!oldHistory);
+    console.log('History button exists:', !!historyToggleBtn);
+    
+    if (oldHistory) {
+        console.log('History children count:', oldHistory.children.length);
+        console.log('History content:', oldHistory.innerHTML.substring(0, 200) + '...');
+        
+        let commandCount = 0;
+        for (let i = 0; i < oldHistory.children.length; i++) {
+            const child = oldHistory.children[i];
+            if (child.classList.contains('terminal-message') && 
+                child.textContent.includes('user@k8s-terminal:~$')) {
+                commandCount++;
+            }
+        }
+        console.log('Actual command count:', commandCount);
+    }
+    
+    if (historyToggleBtn) {
+        console.log('History button hidden:', historyToggleBtn.classList.contains('hidden'));
+    }
+};
     
     window.checkScrollState = function() {
         const scrollHeight = terminalMessages.scrollHeight;
@@ -3254,9 +3440,18 @@ function initializeHistoryHandling() {
         console.log('✅ TEXTBOX-TOP POSITIONING SYSTEM ACTIVE');
         console.log('🎯 Button positioned at top edge of chat textbox');
         console.log('');
+        console.log('📚 CEO GPU DISCOUNT MODE - HISTORY BUTTON SYSTEM ACTIVE');
+        console.log('🎯 History button ONLY shows for actual user commands');
+        console.log('🚫 System messages do NOT trigger history button');
+        console.log('⚡ Periodic enforcement ensures button stays hidden');
+        console.log('');
         console.log('🧪 TEST: Resize your browser window now');
         console.log('');
-        console.log('🛠️  Command: fixButtonPosition() - Apply positioning manually');
+        console.log('🛠️  Commands:');
+        console.log('   fixButtonPosition() - Apply positioning manually');
+        console.log('   updateHistoryButton() - Update history button visibility');
+        console.log('   forceHideHistoryButton() - Force hide history button');
+        console.log('   checkHistoryContent() - Debug history content and button state');
     }, 1000);
     
     // Periodic check to ensure button is correctly shown/hidden
@@ -3279,6 +3474,45 @@ function initializeHistoryHandling() {
             checkScrollPosition();
         }
     }, 2000); // Check every 2 seconds
+    
+    // CEO GPU DISCOUNT MODE: Periodic history button enforcement
+    setInterval(() => {
+        const histBtn = document.getElementById('history-toggle-btn');
+        const oldHistory = document.getElementById('old-history');
+        
+        if (histBtn && !histBtn.classList.contains('hidden')) {
+            // Button is showing - verify it should be
+            let shouldShow = false;
+            
+            if (oldHistory && oldHistory.children.length > 0) {
+                for (let i = 0; i < oldHistory.children.length; i++) {
+                    const child = oldHistory.children[i];
+                    const text = child.textContent || '';
+                    
+                    if (child.classList.contains('terminal-message') && 
+                        text.includes('user@k8s-terminal:~$') &&
+                        !text.includes('Connected to') &&
+                        !text.includes('Terminal ready') &&
+                        !text.includes('Type \'help\'')) {
+                        
+                        const commandPart = text.split('user@k8s-terminal:~$')[1];
+                        if (commandPart && commandPart.trim() && 
+                            commandPart.trim() !== 'clear' &&
+                            commandPart.trim() !== 'history') {
+                            shouldShow = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if (!shouldShow) {
+                histBtn.classList.add('hidden');
+                histBtn.style.setProperty('display', 'none', 'important');
+                console.log('🎯 CEO ENFORCEMENT: History button force hidden');
+            }
+        }
+    }, 1000); // Check every 1 second for bulletproof enforcement
 }
 
 // Smooth scroll to bottom function
