@@ -685,6 +685,13 @@ function appendTerminalMessage(type, content, exitCode = null) {
     
     // Auto-scroll to bottom
     autoScrollToBottom();
+    
+    // Trigger scroll button check after new content is added
+    setTimeout(() => {
+        if (window.smartScrollChecker) {
+            window.smartScrollChecker();
+        }
+    }, 100);
 }
 
 async function updateCurrentPath() {
@@ -721,7 +728,7 @@ async function switchToSession(sessionId, clusterName) {
     setTerminalInputState(true);
     
     // Initialize scroll button now that terminal is visible
-    initializeScrollToBottom();
+    initializeSmartScroll();
     
     // Update active session in sidebar
     document.querySelectorAll('.cluster-session').forEach(session => {
@@ -1324,12 +1331,19 @@ function pasteNanoLine(editor) {
 document.addEventListener('DOMContentLoaded', () => {
     if (currentSessionId) {
         terminalInput.focus();
+        // If there's already a session, initialize scroll button
+        setTimeout(() => {
+            const terminalContainer = document.getElementById('terminal-container');
+            if (terminalContainer && !terminalContainer.classList.contains('hidden')) {
+                initializeSmartScroll();
+            }
+        }, 500);
     }
     
     // Initialize history handling
     initializeHistoryHandling();
     
-    // Don't initialize scroll button until terminal is shown
+    // Don't initialize smart scroll button until terminal is shown
 });
 
 // Initialize history handling
@@ -1345,107 +1359,183 @@ function initializeHistoryHandling() {
     // History toggle functionality
     let historyVisible = false;
     historyToggleBtn.addEventListener('click', () => {
+        const currentScrollTop = terminalMessages.scrollTop; // Save current scroll position
+        
         historyVisible = !historyVisible;
         if (historyVisible) {
             oldHistory.classList.remove('hidden');
             historyText.textContent = 'Hide History';
             historyIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88" />';
+            
+            // When showing history, scroll to top to see the history
+            setTimeout(() => {
+                if (terminalMessages) {
+                    terminalMessages.scrollTop = 0;
+                }
+            }, 100);
         } else {
             oldHistory.classList.add('hidden');
             historyText.textContent = 'Show History';
             historyIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />';
+            
+            // When hiding history, restore previous scroll position or go to bottom
+            setTimeout(() => {
+                if (terminalMessages) {
+                    terminalMessages.scrollTop = terminalMessages.scrollHeight;
+                }
+            }, 100);
         }
         
-        // Scroll to bottom after toggle
+        // Update scroll button after toggle
         setTimeout(() => {
-            if (terminalMessages) {
-                terminalMessages.scrollTop = terminalMessages.scrollHeight;
+            if (window.smartScrollChecker) {
+                window.smartScrollChecker();
             }
-        }, 100);
+        }, 150);
     });
 }
 
-// Initialize scroll to bottom functionality
-function initializeScrollToBottom() {
+// Initialize smart scroll functionality (bidirectional)
+function initializeSmartScroll() {
     const terminalMessages = document.getElementById('terminal-messages');
-    const scrollButton = document.getElementById('scroll-to-bottom');
-    
-    if (!terminalMessages || !scrollButton) {
+    const scrollButton = document.getElementById('smart-scroll-btn');
+    const scrollIcon = document.getElementById('scroll-icon');
+    const scrollTooltipText = document.getElementById('scroll-tooltip-text');
+      
+    if (!terminalMessages || !scrollButton || !scrollIcon || !scrollTooltipText) {
         return;
     }
     
-    // Make sure we don't initialize twice
-    if (window.scrollButtonInitialized) {
-        return;
-    }
-    window.scrollButtonInitialized = true;
+    let currentScrollDirection = 'down'; // 'up' or 'down'
     
-    let userScrolledUp = false;
-    
-    // Simple function to check if at bottom
-    function isAtBottom() {
-        const scrollTop = terminalMessages.scrollTop;
-        const scrollHeight = terminalMessages.scrollHeight;
-        const clientHeight = terminalMessages.clientHeight;
-        return (scrollHeight - scrollTop - clientHeight) < 20;
-    }
-    
-    // Simple function to check if has scrollable content
-    function hasScrollableContent() {
-        return terminalMessages.scrollHeight > terminalMessages.clientHeight + 10;
-    }
-    
-    // Update button visibility
-    function updateButtonVisibility() {
-        const hasContent = hasScrollableContent();
-        const atBottom = isAtBottom();
-        
-        if (hasContent && !atBottom) {
-            scrollButton.classList.remove('hidden');
+    // Update button appearance based on scroll direction
+    function updateButtonAppearance(direction) {
+        if (direction === 'down') {
+            // Scroll down arrow
+            scrollIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 13.5 12 21m0 0-7.5-7.5M12 21V3" />';
+            scrollTooltipText.textContent = 'Scroll to bottom';
+            scrollIcon.style.transform = 'rotate(0deg)';
         } else {
+            // Scroll up arrow
+            scrollIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5 12 3m0 0 7.5 7.5M12 3v18" />';
+            scrollTooltipText.textContent = 'Scroll to top';
+            scrollIcon.style.transform = 'rotate(0deg)';
+        }
+        currentScrollDirection = direction;
+    }
+    
+    // Check scroll position and determine button behavior
+    function checkScrollPosition() {
+        // Get scroll measurements
+        const terminalScrollHeight = terminalMessages.scrollHeight;
+        const terminalClientHeight = terminalMessages.clientHeight;
+        const terminalScrollTop = terminalMessages.scrollTop;
+        
+        // Check if there are child elements that exceed the container
+        const childrenHeight = Array.from(terminalMessages.children).reduce((total, child) => {
+            return total + child.offsetHeight;
+        }, 0);
+        
+        const hasScrollableContent = terminalScrollHeight > terminalClientHeight + 5 || childrenHeight > terminalClientHeight + 5 || terminalMessages.children.length > 3;
+        
+        // Debug logs (can be removed in production)
+        // console.log('=== Scroll Check Debug ===');
+        // console.log('Terminal scrollHeight:', terminalScrollHeight);
+        // console.log('Terminal clientHeight:', terminalClientHeight);
+        
+        if (!hasScrollableContent) {
+            scrollButton.classList.add('hidden');
+            return;
+        }
+        const distanceFromBottom = terminalScrollHeight - terminalScrollTop - terminalClientHeight;
+        const distanceFromTop = terminalScrollTop;
+        
+        // Thresholds for determining position
+        const topThreshold = 10;
+        const bottomThreshold = 10;
+        
+        const isAtTop = distanceFromTop <= topThreshold;
+        const isAtBottom = distanceFromBottom <= bottomThreshold;
+        
+        // console.log('Checking scroll position:', { distanceFromBottom, distanceFromTop, isAtTop, isAtBottom });
+        
+        // Show button and set direction based on position
+        if (isAtTop && !isAtBottom) {
+            // At top - show scroll down button
+            updateButtonAppearance('down');
+            showScrollButton();
+        } else if (isAtBottom && !isAtTop) {
+            // At bottom - show scroll up button
+            updateButtonAppearance('up');
+            showScrollButton();
+        } else if (!isAtTop && !isAtBottom) {
+            // In middle - determine direction based on which end is closer
+            const scrollProgress = terminalScrollTop / (terminalScrollHeight - terminalClientHeight);
+            
+            if (scrollProgress < 0.5) {
+                // Closer to top - suggest scrolling down
+                updateButtonAppearance('down');
+            } else {
+                // Closer to bottom - suggest scrolling up
+                updateButtonAppearance('up');
+            }
+            showScrollButton();
+        } else {
+            // Edge case or no scrollable content
             scrollButton.classList.add('hidden');
         }
     }
     
-    // Handle scroll events
-    terminalMessages.addEventListener('scroll', () => {
-        updateButtonVisibility();
-        
-        // Track if user manually scrolled up
-        if (!isAtBottom()) {
-            userScrolledUp = true;
+    function showScrollButton() {
+        scrollButton.classList.remove('hidden');
+        scrollButton.style.display = 'block';
+    }
+    
+    // Button click handler
+    scrollButton.addEventListener('click', function() {
+        if (currentScrollDirection === 'down') {
+            // Scroll to bottom
+            terminalMessages.scrollTo({
+                top: terminalMessages.scrollHeight,
+                behavior: 'smooth'
+            });
         } else {
-            userScrolledUp = false;
+            // Scroll to top
+            terminalMessages.scrollTo({
+                top: 0,
+                behavior: 'smooth'
+            });
         }
     });
     
-    // Click handler for scroll button
-    scrollButton.addEventListener('click', () => {
-        terminalMessages.scrollTop = terminalMessages.scrollHeight;
-        userScrolledUp = false;
-        updateButtonVisibility();
-    });
+    // Check position on scroll
+    terminalMessages.addEventListener('scroll', checkScrollPosition);
     
-    // Update button when content changes
-    const observer = new MutationObserver(() => {
-        // Small delay to let content render
-        setTimeout(() => {
-            updateButtonVisibility();
-        }, 50);
-    });
+    // Check position when content changes
+    const observer = new MutationObserver(checkScrollPosition);
+    observer.observe(terminalMessages, { childList: true, subtree: true });
     
-    observer.observe(terminalMessages, {
-        childList: true,
-        subtree: true
-    });
+    // Expose checker function globally for manual triggers
+    window.smartScrollChecker = checkScrollPosition;
     
-    // Store state for auto-scroll
-    window.terminalScrollState = {
-        isUserScrolledUp: () => userScrolledUp,
-        resetScrollState: () => {
-            userScrolledUp = false;
-        }
+    // Keep debug functions for troubleshooting (can be removed in production)
+    window.forceShowScrollButton = function() {
+        updateButtonAppearance('down');
+        showScrollButton();
     };
+    
+    window.debugScrollButton = function() {
+        console.log('Button element exists:', !!scrollButton);
+        console.log('Terminal scroll info:', {
+            scrollHeight: terminalMessages?.scrollHeight,
+            clientHeight: terminalMessages?.clientHeight,
+            scrollTop: terminalMessages?.scrollTop
+        });
+        checkScrollPosition();
+    };
+    
+    // Initial check with delay to ensure content is rendered
+    setTimeout(checkScrollPosition, 200);
 }
 
 // Smooth scroll to bottom function
@@ -1464,16 +1554,10 @@ function smoothScrollToBottom() {
     }
 }
 
-// Auto-scroll to bottom (only if user hasn't manually scrolled up)
+// Auto-scroll to bottom
 function autoScrollToBottom() {
     const terminalMessages = document.getElementById('terminal-messages');
-    if (!terminalMessages) return;
-    
-    // Only auto-scroll if user hasn't manually scrolled up
-    const userScrolledUp = window.terminalScrollState && window.terminalScrollState.isUserScrolledUp();
-    
-    if (!userScrolledUp) {
-        // Instant scroll for better UX
+    if (terminalMessages) {
         terminalMessages.scrollTop = terminalMessages.scrollHeight;
     }
 }
