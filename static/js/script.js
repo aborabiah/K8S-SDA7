@@ -27,6 +27,31 @@ let historyIndex = 0;
 let currentCommandAbortController = null;
 let connectionCheckInterval = null;
 
+// IMMEDIATE HOMEPAGE CHECK - Hide scroll button if no textbox
+function hideScrollButtonOnHomepage() {
+    const textbox = document.getElementById('terminal-input');
+    const container = document.querySelector('.scroll-button-container');
+    const scrollButton = document.getElementById('smart-scroll-btn');
+    
+    if (!textbox && container) {
+        // Homepage detected - force hide everything
+        container.style.setProperty('display', 'none', 'important');
+        if (scrollButton) {
+            scrollButton.classList.add('hidden');
+            scrollButton.style.display = 'none';
+        }
+        console.log('🚫 HOMEPAGE: Scroll button hidden immediately');
+        return true;
+    }
+    return false;
+}
+
+// Run immediately
+hideScrollButtonOnHomepage();
+
+// Run again when DOM is fully loaded
+document.addEventListener('DOMContentLoaded', hideScrollButtonOnHomepage);
+
 // Notification system
 function showNotification(message, type = 'error', duration = 4000) {
     // Create notification container if it doesn't exist
@@ -1123,6 +1148,18 @@ async function switchToSession(sessionId, clusterName, clusterId) {
         // Initialize direct positioning for new session  
     setTimeout(() => {
         console.log('🎯 Setting up textbox-top positioning');
+        
+        // Check if textbox exists on this page
+        const textbox = document.getElementById('terminal-input');
+        if (!textbox) {
+            // No textbox (homepage) - hide everything
+            const container = document.querySelector('.scroll-button-container');
+            const scrollButton = document.getElementById('smart-scroll-btn');
+            if (container) container.style.display = 'none';
+            if (scrollButton) scrollButton.classList.add('hidden');
+            console.log('🚫 Homepage detected - scroll button hidden');
+            return;
+        }
         
         // Apply initial positioning
         if (window.fixButtonPosition) {
@@ -2328,6 +2365,21 @@ function initializeHistoryHandling() {
     
     // Intelligent scroll button - only appears when content actually needs scrolling
     function checkScrollPosition() {
+        // Check if we're on a page with textbox (chat page)
+        const textbox = document.getElementById('terminal-input');
+        
+        // ALWAYS HIDE BUTTON FIRST - then decide if we should show it
+        scrollButton.classList.add('hidden');
+        scrollButton.style.display = 'none';
+        
+        if (!textbox) {
+            // No textbox (homepage) - hide container and return
+            const container = document.querySelector('.scroll-button-container');
+            if (container) container.style.display = 'none';
+            console.log('🚫 No textbox - hiding scroll button (homepage)');
+            return;
+        }
+        
         // Force reflow to get accurate measurements after DOM changes
         terminalMessages.offsetHeight;
         
@@ -2338,10 +2390,6 @@ function initializeHistoryHandling() {
         
         // FUNDAMENTAL CHECK: Does content actually require scrolling?
         const needsScrolling = scrollHeight > clientHeight + 20; // 20px buffer
-        
-        // ALWAYS HIDE BUTTON FIRST - then decide if we should show it
-            scrollButton.classList.add('hidden');
-        scrollButton.style.display = 'none';
         
         if (!needsScrolling) {
             // Content fits perfectly - no scrolling needed, keep button hidden
@@ -2381,6 +2429,18 @@ function initializeHistoryHandling() {
     function showScrollButton() {
         // Don't reposition if scroll is in progress
         if (window.scrollInProgress) {
+            return;
+        }
+        
+        // Check if we're on a page with textbox (chat page)
+        const textbox = document.getElementById('terminal-input');
+        if (!textbox) {
+            // No textbox (homepage) - hide button completely
+            scrollButton.classList.add('hidden');
+            scrollButton.style.display = 'none';
+            const container = document.querySelector('.scroll-button-container');
+            if (container) container.style.display = 'none';
+            console.log('🚫 No textbox - hiding scroll button (homepage)');
             return;
         }
         
@@ -2471,8 +2531,23 @@ function initializeHistoryHandling() {
          const container = document.querySelector('.scroll-button-container');
          const chat = document.getElementById('terminal-messages');
          const textbox = document.getElementById('terminal-input');
+         const scrollButton = document.getElementById('smart-scroll-btn');
          
-         if (!container || !chat || !textbox) return;
+         if (!container) return;
+         
+         // If no textbox exists (like on homepage), hide the button completely
+         if (!textbox || !chat) {
+             if (scrollButton) {
+                 scrollButton.classList.add('hidden');
+                 console.log('🚫 No textbox found - hiding scroll button');
+             }
+             container.style.display = 'none';
+             return;
+         }
+         
+         // Textbox exists - show container and position button
+         container.style.display = 'block';
+         container.style.setProperty('display', 'block', 'important');
          
          const chatRect = chat.getBoundingClientRect();
          const textboxRect = textbox.getBoundingClientRect();
@@ -2491,8 +2566,18 @@ function initializeHistoryHandling() {
          console.log('✅ Button positioned - X:', centerX, 'Y:', topY);
      }
      
-     // Position immediately and on resize
-     positionButtonInChatCenter();
+     // Check immediately if textbox exists and hide button if not
+     const textbox = document.getElementById('terminal-input');
+     if (!textbox) {
+         const container = document.querySelector('.scroll-button-container');
+         const scrollButton = document.getElementById('smart-scroll-btn');
+         if (container) container.style.display = 'none';
+         if (scrollButton) scrollButton.classList.add('hidden');
+         console.log('🚫 No textbox - hiding scroll button immediately');
+     } else {
+         // Position immediately and on resize
+         positionButtonInChatCenter();
+     }
      
      window.addEventListener('resize', () => {
          setTimeout(positionButtonInChatCenter, 50);
@@ -3159,6 +3244,13 @@ function initializeHistoryHandling() {
     
                 // Final setup of direct positioning system
     setTimeout(() => {
+        const textbox = document.getElementById('terminal-input');
+        if (!textbox) {
+            console.log('🚫 HOMEPAGE MODE - Scroll button hidden');
+            console.log('📍 Navigate to a chat session to see the scroll button');
+            return;
+        }
+        
         console.log('✅ TEXTBOX-TOP POSITIONING SYSTEM ACTIVE');
         console.log('🎯 Button positioned at top edge of chat textbox');
         console.log('');
