@@ -1,0 +1,280 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>K8S AI Terminal</title>
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Fonts: Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <!-- Heroicons for modern icons -->
+  <script src="https://unpkg.com/heroicons@2.1.3/24/outline/index.js"></script>
+  <link rel="stylesheet" href="{% static 'css/styles.css' %}" />
+</head>
+<body class="text-gray-200 bg-[#171717]">
+  <div class="flex h-screen">
+    <!-- Sidebar -->
+    <aside id="sidebar" class="bg-black/90 w-72 p-3 flex flex-col fixed inset-y-0 left-0 transform -translate-x-full md:relative md:translate-x-0 transition-transform duration-300 ease-in-out z-30 backdrop-blur-sm border-r border-white/10">
+      <!-- Header -->
+      <div class="flex items-center justify-between mb-6">
+        <div class="flex items-center gap-2">
+          <div class="bg-white/10 p-1.5 rounded-lg">
+            <svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+            </svg>
+          </div>
+          <span class="font-semibold text-lg">ChatGPT</span>
+        </div>
+        <button id="new-cluster-btn" class="p-2 rounded-lg hover:bg-white/10" title="Add New Cluster">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+          </svg>
+        </button>
+      </div>
+      <!-- Pinned Conversations -->
+      <div>
+        <h3 class="px-3 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Pinned</h3>
+        <nav class="flex flex-col gap-1">
+          <a href="#" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium bg-white/5 transition-colors duration-200">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-gray-400"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 7.5V6.108c0-1.135.845-2.098 1.976-2.192.353-.026.692-.026 1.038 0 .984.084 1.75.93 1.75 1.908v1.392m-6.375 0h6.375m-6.375 0v6.375c0 1.135.845 2.098 1.976 2.192.353.026.692-.026 1.038 0 .984.084 1.75.93 1.75 1.908v1.392m-6.375 0h6.375" /></svg>
+            <span class="truncate">Welcome to ChatGPT Land</span>
+          </a>
+        </nav>
+      </div>
+      <!-- Cluster Sessions -->
+      <div class="flex-grow mt-6 overflow-y-auto custom-scrollbar -mr-3 pr-3">
+        <h3 class="px-3 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Clusters</h3>
+        <nav id="cluster-list" class="flex flex-col gap-1">
+          {% for cluster in clusters %}
+            {% for session in cluster.chat_sessions.all %}
+              {% if session.is_active %}
+                <a href="#" 
+                   class="cluster-session px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-white/5 transition-colors duration-200 truncate"
+                   data-session-id="{{ session.session_id }}"
+                   data-cluster-name="{{ cluster.name }}">
+                  <div class="flex items-center gap-2">
+                    <div class="w-2 h-2 rounded-full {% if cluster.connection_status == 'connected' %}bg-green-500{% elif cluster.connection_status == 'error' %}bg-red-500{% else %}bg-yellow-500{% endif %}"></div>
+                    {{ session.name }}
+                  </div>
+                </a>
+              {% endif %}
+            {% endfor %}
+          {% empty %}
+            <p class="px-3 py-2 text-sm text-gray-500">No clusters configured</p>
+          {% endfor %}
+        </nav>
+      </div>
+      <!-- User Menu -->
+      <div class="border-t border-white/10 mt-auto pt-3">
+        <a href="#" class="flex items-center gap-3 p-3 rounded-lg text-sm font-medium hover:bg-white/5 transition-colors duration-200">
+          <div class="w-7 h-7 flex-shrink-0 rounded-full flex items-center justify-center bg-blue-600 text-white font-bold">U</div>
+          <span class="truncate font-semibold">User</span>
+        </a>
+      </div>
+    </aside>
+    <!-- Main Content -->
+    <main class="flex-1 flex flex-col relative bg-[#1C1C1C]">
+      <!-- Mobile Header -->
+      <header class="md:hidden flex items-center justify-between p-2 bg-black/80 backdrop-blur-sm border-b border-white/10 sticky top-0 z-10">
+        <button id="menu-btn" class="p-2 rounded-lg hover:bg-white/10">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" /></svg>
+        </button>
+        <h1 class="text-lg font-semibold">New Chat</h1>
+        <button class="p-2 rounded-lg hover:bg-white/10"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg></button>
+      </header>
+      <!-- Chat Area -->
+      <div id="chat-container" class="flex-1 overflow-y-auto p-4 md:p-6 custom-scrollbar">
+        <div class="max-w-4xl mx-auto">
+          <div id="welcome-message" class="text-center py-20">
+            <div class="inline-block bg-white/10 rounded-full p-3 mb-6 shadow-lg">
+              <svg class="w-10 h-10 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3V6a3 3 0 013-3h13.5a3 3 0 013 3v5.25a3 3 0 01-3 3m-16.5 0a2.25 2.25 0 00-2.25 2.25v1.5A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75v-1.5a2.25 2.25 0 00-2.25-2.25H5.25z" />
+              </svg>
+            </div>
+            <h2 class="text-3xl md:text-4xl font-bold text-white">Terminal</h2>
+            <p class="text-gray-400 mt-4">Select a cluster from the sidebar to start terminal session</p>
+          </div>
+                          <!-- Terminal Interface -->
+                <div class="hidden w-full flex-1 bg-slate-900 border border-blue-500/30 rounded-xl shadow-2xl flex flex-col overflow-hidden" id="terminal-container">
+                    <!-- Terminal Header -->
+                    <div class="bg-slate-800 text-blue-300 px-4 py-3 border-b border-blue-500/30 font-mono text-sm">
+                        <div class="flex items-center gap-3">
+                            <div class="w-3 h-3 bg-blue-400 rounded-full animate-pulse"></div>
+                            <span id="current-session-name" class="text-blue-200">user@k8s-terminal:~$</span>
+                            <div class="ml-auto flex items-center gap-3">
+                                <button id="history-toggle-btn" class="hidden flex items-center gap-2 px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 rounded-lg text-xs text-blue-300 transition-all duration-200">
+                                    <svg id="history-icon" class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                                    </svg>
+                                    <span id="history-text">Show History</span>
+                                </button>
+                                <div class="text-xs text-blue-400">
+                                    Connected • Press Ctrl+C to interrupt
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Terminal Output -->
+                    <div id="terminal-messages" class="relative flex-1 bg-slate-900 text-blue-200 p-4 space-y-1 overflow-y-auto font-mono text-sm" style="min-height: 400px;">
+                        <!-- Welcome message -->
+                        <div id="welcome-message" class="text-blue-300 mb-4">
+                            <div class="text-blue-400">Connected to k8s. Terminal ready.</div>
+                            <div class="text-blue-500">Type 'help' for available commands.</div>
+                        </div>
+                        <!-- Old history container -->
+                        <div id="old-history" class="hidden border-b border-blue-800/50 pb-4 mb-4 opacity-70">
+                            <!-- Old terminal messages will appear here -->
+                        </div>
+                        <!-- Current session messages -->
+                        <div id="current-session">
+                            <!-- New terminal messages will appear here -->
+                        </div>
+                        
+
+                    </div>
+                    
+                    <!-- Terminal Input -->
+                    <div class="bg-slate-800 border-t border-blue-500/30 p-4">
+                        <form id="terminal-form" class="flex items-center gap-2">
+                            <span class="text-blue-300 font-mono">user@k8s-terminal:~$</span>
+                            <input 
+                                type="text" 
+                                id="terminal-input"
+                                class="flex-1 bg-slate-800 text-blue-100 font-mono outline-none caret-blue-400 border-none"
+                                placeholder=""
+                                disabled
+                            >
+                            <button type="submit" id="terminal-submit" class="hidden"></button>
+                        </form>
+                        <div class="mt-2 text-xs text-blue-400">
+                            Use ↑↓ arrows for command history • Ctrl+C to interrupt • vim/nano for editing
+                        </div>
+                    </div>
+                </div>
+        </div>
+      </div>
+
+    </main>
+    
+    <!-- Scroll to Bottom Button - better positioned -->
+    <button id="scroll-to-bottom" class="hidden fixed bottom-32 right-8 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white p-2.5 rounded-full shadow-lg border border-blue-500/30 backdrop-blur-sm transition-all duration-200 ease-out hover:scale-105 z-50 group">
+        <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 13.5 12 21m0 0-7.5-7.5M12 21V3" />
+        </svg>
+        <div class="absolute -top-10 left-1/2 transform -translate-x-1/2 bg-slate-800 text-blue-200 px-2 py-1 rounded text-xs opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap border border-blue-500/20">
+            Scroll to bottom
+            <div class="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-2 border-r-2 border-t-2 border-transparent border-t-slate-800"></div>
+        </div>
+    </button>
+  </div>
+  
+  <!-- Cluster Configuration Modal -->
+  <div id="cluster-modal" class="fixed inset-0 bg-black bg-opacity-60 z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-[#2a2a2a] rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+      <div class="p-6">
+        <div class="flex items-center justify-between mb-6">
+          <h2 class="text-2xl font-bold text-white">Add Kubernetes Cluster</h2>
+          <button id="close-modal" class="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        
+        <form id="cluster-form" class="space-y-6">
+          <div>
+            <label for="cluster-name" class="block text-sm font-medium text-gray-300 mb-2">
+              Cluster Name
+            </label>
+            <input 
+              type="text" 
+              id="cluster-name" 
+              name="name"
+              class="w-full bg-[#1a1a1a] border border-white/10 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="My Kubernetes Cluster"
+              required
+            />
+          </div>
+          
+          <div>
+            <label for="kubeconfig" class="block text-sm font-medium text-gray-300 mb-2">
+              Kubeconfig
+            </label>
+            <textarea 
+              id="kubeconfig" 
+              name="kubeconfig"
+              rows="12"
+              class="w-full bg-[#1a1a1a] border border-white/10 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm custom-scrollbar"
+              placeholder="apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: ...
+    server: https://...
+  name: ...
+contexts:
+- context:
+    cluster: ...
+    user: ...
+  name: ...
+current-context: ...
+kind: Config
+preferences: {}
+users:
+- name: ...
+  user:
+    client-certificate-data: ...
+    client-key-data: ..."
+              required
+            ></textarea>
+            <p class="text-sm text-gray-500 mt-2">
+              Paste your kubeconfig file content here. You can get this from your cluster provider or using <code class="bg-black/30 px-1 rounded">kubectl config view --raw</code>
+            </p>
+
+          </div>
+          
+          <div id="cluster-error" class="hidden bg-red-900/30 border border-red-500/30 rounded-lg p-4">
+            <div class="flex items-center gap-2 text-red-400">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+              <span id="cluster-error-message"></span>
+            </div>
+          </div>
+          
+          <div class="flex gap-3 pt-4">
+            <button 
+              type="button" 
+              id="cancel-cluster" 
+              class="flex-1 px-4 py-3 bg-white/10 text-white rounded-lg hover:bg-white/20 transition-colors"
+            >
+              Cancel
+            </button>
+            <button 
+              type="submit" 
+              id="create-cluster" 
+              class="flex-1 px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-600 disabled:cursor-not-allowed"
+            >
+              <span id="create-cluster-text">Connect Cluster</span>
+              <svg id="create-cluster-loading" class="hidden animate-spin w-5 h-5 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+  
+  <div id="overlay" class="fixed inset-0 bg-black bg-opacity-60 z-20 hidden"></div>
+  <script src="{% static 'js/script.js' %}"></script>
+</body>
+</html>
+
+
