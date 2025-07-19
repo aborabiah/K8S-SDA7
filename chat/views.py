@@ -312,3 +312,259 @@ def list_clusters(request):
         'success': True,
         'clusters': clusters_data
     }) 
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def rename_cluster(request, cluster_id):
+    """Rename a cluster/chat session."""
+    try:
+        cluster = get_object_or_404(KubernetesCluster, id=cluster_id)
+        data = json.loads(request.body)
+        new_name = data.get('name', '').strip()
+        
+        if not new_name:
+            return JsonResponse({
+                'success': False,
+                'error': 'Name is required'
+            })
+        
+        # Update cluster name
+        cluster.name = new_name
+        cluster.save()
+        
+        # Update related chat session names
+        for session in cluster.chat_sessions.filter(is_active=True):
+            session.name = f"{new_name} Terminal"
+            session.save()
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Chat renamed successfully'
+        })
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': f'Server error: {str(e)}'
+        })
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def clear_history(request, session_id):
+    """Clear command history for a chat session."""
+    try:
+        chat_session = get_object_or_404(ChatSession, session_id=session_id)
+        
+        # Delete all command history for this session
+        CommandHistory.objects.filter(chat_session=chat_session).delete()
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'History cleared successfully'
+        })
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': f'Server error: {str(e)}'
+        })
+
+
+@require_http_methods(["GET"])
+def get_kubeconfig(request, cluster_id):
+    """Get kubeconfig for a cluster."""
+    try:
+        cluster = get_object_or_404(KubernetesCluster, id=cluster_id)
+        
+        return JsonResponse({
+            'success': True,
+            'kubeconfig': cluster.kubeconfig
+        })
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': f'Server error: {str(e)}'
+        })
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def update_kubeconfig(request, cluster_id):
+    """Update kubeconfig for a cluster."""
+    try:
+        cluster = get_object_or_404(KubernetesCluster, id=cluster_id)
+        data = json.loads(request.body)
+        kubeconfig_content = data.get('kubeconfig', '').strip()
+        
+        if not kubeconfig_content:
+            return JsonResponse({
+                'success': False,
+                'error': 'Kubeconfig is required'
+            })
+        
+        # Validate kubeconfig format
+        try:
+            kubeconfig_data = yaml.safe_load(kubeconfig_content)
+            if not isinstance(kubeconfig_data, dict) or 'clusters' not in kubeconfig_data:
+                raise ValueError("Invalid kubeconfig format")
+        except (yaml.YAMLError, ValueError) as e:
+            return JsonResponse({
+                'success': False,
+                'error': f'Invalid kubeconfig format: {str(e)}'
+            })
+        
+        # Update kubeconfig
+        cluster.kubeconfig = kubeconfig_content
+        
+        # Test connection with new kubeconfig
+        connection_result = test_cluster_connection(cluster)
+        cluster.connection_status = connection_result['status']
+        cluster.connection_error = connection_result.get('error', '')
+        cluster.last_connection_check = timezone.now()
+        cluster.save()
+        
+        if connection_result['status'] == 'connected':
+            return JsonResponse({
+                'success': True,
+                'message': 'Kubeconfig updated successfully'
+            })
+        else:
+            return JsonResponse({
+                'success': False,
+                'error': f'Kubeconfig updated but connection failed: {connection_result.get("error", "Unknown error")}'
+            })
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': f'Server error: {str(e)}'
+        })
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+def delete_cluster(request, cluster_id):
+    """Delete a cluster and all its data."""
+    try:
+        cluster = get_object_or_404(KubernetesCluster, id=cluster_id)
+        
+        # Mark cluster as inactive instead of deleting to preserve data
+        cluster.is_active = False
+        cluster.save()
+        
+        # Mark all chat sessions as inactive
+        cluster.chat_sessions.update(is_active=False)
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Chat deleted successfully'
+        })
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': f'Server error: {str(e)}'
+        })
+
+@require_http_methods(["GET"])
+def check_cluster_status(request, cluster_id):
+    """Check cluster connection status."""
+    try:
+        cluster = get_object_or_404(KubernetesCluster, id=cluster_id)
+        
+        # Test connection by running a simple kubectl command
+        if cluster.kubeconfig:
+            try:
+                # Create a temporary kubeconfig file
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                    f.write(cluster.kubeconfig)
+                    kubeconfig_path = f.name
+                
+                try:
+                    # Test connection with a simple command that actually tests server connectivity
+                    env = os.environ.copy()
+                    env['KUBECONFIG'] = kubeconfig_path
+                    
+                    # First try to get cluster info (tests actual connectivity)
+                    result = subprocess.run(
+                        ['kubectl', 'cluster-info', '--request-timeout=5s'],
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                        timeout=8  # Short timeout for status check
+                    )
+                    
+                    if result.returncode == 0 and 'running at' in result.stdout.lower():
+                        # Cluster is actually reachable
+                        cluster.connection_status = 'connected'
+                        cluster.save()
+                        
+                        return JsonResponse({
+                            'success': True,
+                            'status': 'connected'
+                        })
+                    else:
+                        # Try fallback - just test if kubeconfig is valid
+                        fallback_result = subprocess.run(
+                            ['kubectl', 'config', 'view', '--minify'],
+                            capture_output=True,
+                            text=True,
+                            env=env,
+                            timeout=5
+                        )
+                        
+                        if fallback_result.returncode == 0:
+                            # Kubeconfig is valid, assume connection is working
+                            cluster.connection_status = 'connected'
+                            cluster.save()
+                            
+                            return JsonResponse({
+                                'success': True,
+                                'status': 'connected'
+                            })
+                        else:
+                            # Connection failed
+                            cluster.connection_status = 'error'
+                            cluster.save()
+                            
+                            return JsonResponse({
+                                'success': True,
+                                'status': 'error'
+                            })
+                        
+                finally:
+                    # Clean up temporary file
+                    if os.path.exists(kubeconfig_path):
+                        os.unlink(kubeconfig_path)
+                        
+            except subprocess.TimeoutExpired:
+                cluster.connection_status = 'error'
+                cluster.save()
+                return JsonResponse({
+                    'success': True,
+                    'status': 'error'
+                })
+            except Exception as e:
+                cluster.connection_status = 'error'
+                cluster.save()
+                return JsonResponse({
+                    'success': True,
+                    'status': 'error'
+                })
+        else:
+            # No kubeconfig available
+            cluster.connection_status = 'error'
+            cluster.save()
+            return JsonResponse({
+                'success': True,
+                'status': 'error'
+            })
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': f'Server error: {str(e)}'
+        }) 

@@ -20,10 +20,94 @@ const clusterErrorMessage = document.getElementById('cluster-error-message');
 // Current session state
 let currentSessionId = null;
 let currentClusterName = null;
+let currentClusterId = null;
 let currentPath = '~';
 let commandHistory = [];
 let historyIndex = 0;
 let currentCommandAbortController = null;
+let connectionCheckInterval = null;
+
+// Notification system
+function showNotification(message, type = 'error', duration = 4000) {
+    // Create notification container if it doesn't exist
+    let container = document.getElementById('notification-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'notification-container';
+        container.className = 'fixed top-4 right-4 z-[100] space-y-2';
+        document.body.appendChild(container);
+    }
+    
+    // Create notification element
+    const notification = document.createElement('div');
+    const id = 'notif-' + Date.now();
+    notification.id = id;
+    
+    const typeStyles = {
+        error: 'bg-red-900/95 border-red-500/50 text-red-100',
+        success: 'bg-green-900/95 border-green-500/50 text-green-100',
+        warning: 'bg-yellow-900/95 border-yellow-500/50 text-yellow-100',
+        info: 'bg-blue-900/95 border-blue-500/50 text-blue-100'
+    };
+    
+    const icons = {
+        error: '⚠️',
+        success: '✅',
+        warning: '⚠️',
+        info: 'ℹ️'
+    };
+    
+    notification.className = `flex items-center gap-3 p-4 rounded-lg border backdrop-blur-sm shadow-2xl transform translate-x-full transition-transform duration-300 ease-out max-w-md ${typeStyles[type]}`;
+    
+    notification.innerHTML = `
+        <span class="text-lg">${icons[type]}</span>
+        <span class="flex-1 text-sm font-medium">${message}</span>
+        <button class="text-white/70 hover:text-white transition-colors ml-2" onclick="closeNotification('${id}')">
+            <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+        </button>
+    `;
+    
+    container.appendChild(notification);
+    
+    // Animate in
+    setTimeout(() => {
+        notification.style.transform = 'translateX(0)';
+    }, 10);
+    
+    // Auto dismiss
+    setTimeout(() => {
+        closeNotification(id);
+    }, duration);
+}
+
+// Make closeNotification globally available
+window.closeNotification = function(id) {
+    const notification = document.getElementById(id);
+    if (notification) {
+        notification.style.transform = 'translateX(100%)';
+        setTimeout(() => {
+            notification.remove();
+        }, 300);
+    }
+}
+
+function showErrorMessage(message) {
+    showNotification(message, 'error');
+}
+
+function showSuccessMessage(message) {
+    showNotification(message, 'success');
+}
+
+function showWarningMessage(message) {
+    showNotification(message, 'warning');
+}
+
+function showInfoMessage(message) {
+    showNotification(message, 'info');
+}
 
 // Event listeners
 terminalForm.addEventListener('submit', handleExecuteCommand);
@@ -42,14 +126,42 @@ if (overlay) {
 overlay.addEventListener('click', toggleSidebar);
 }
 
-// Cluster session clicks
+// Cluster session clicks and menu handling
 document.addEventListener('click', (e) => {
-    if (e.target.closest('.cluster-session')) {
+    // Handle cluster session clicks (but not when clicking menu button)
+    if (e.target.closest('.cluster-session') && !e.target.closest('.cluster-menu-btn')) {
         e.preventDefault();
         const sessionElement = e.target.closest('.cluster-session');
         const sessionId = sessionElement.dataset.sessionId;
         const clusterName = sessionElement.dataset.clusterName;
-        switchToSession(sessionId, clusterName);
+        const clusterId = sessionElement.dataset.clusterId;
+        switchToSession(sessionId, clusterName, clusterId);
+    }
+    
+    // Handle dropdown menu button clicks
+    if (e.target.closest('.cluster-menu-btn')) {
+        e.preventDefault();
+        e.stopPropagation();
+        const menuBtn = e.target.closest('.cluster-menu-btn');
+        const dropdown = menuBtn.closest('.group').querySelector('.cluster-dropdown');
+        
+        // Close all other dropdowns
+        document.querySelectorAll('.cluster-dropdown').forEach(d => {
+            if (d !== dropdown) d.classList.add('hidden');
+        });
+        
+        // Toggle current dropdown
+        dropdown.classList.toggle('hidden');
+        
+        // Store current session data on dropdown for later use
+        dropdown.dataset.sessionId = menuBtn.dataset.sessionId;
+        dropdown.dataset.clusterName = menuBtn.dataset.clusterName;
+        dropdown.dataset.clusterId = menuBtn.dataset.clusterId;
+    }
+    
+    // Close dropdowns when clicking outside
+    if (!e.target.closest('.cluster-dropdown') && !e.target.closest('.cluster-menu-btn')) {
+        document.querySelectorAll('.cluster-dropdown').forEach(d => d.classList.add('hidden'));
     }
 });
 
@@ -58,6 +170,265 @@ clusterModal.addEventListener('click', (e) => {
     if (e.target === clusterModal) {
         hideClusterModal();
     }
+});
+
+// Management modal elements
+const renameModal = document.getElementById('rename-modal');
+const clearHistoryModal = document.getElementById('clear-history-modal');
+const kubeconfigModal = document.getElementById('kubeconfig-modal');
+const deleteModal = document.getElementById('delete-modal');
+
+// Current action context
+let currentActionContext = {};
+
+// Dropdown menu action handlers
+document.addEventListener('click', (e) => {
+    const dropdown = e.target.closest('.cluster-dropdown');
+    if (!dropdown) return;
+    
+    // Get context from dropdown
+    currentActionContext = {
+        sessionId: dropdown.dataset.sessionId,
+        clusterName: dropdown.dataset.clusterName,
+        clusterId: dropdown.dataset.clusterId
+    };
+    
+    // Handle different actions
+    if (e.target.closest('.rename-cluster')) {
+        showRenameModal();
+        dropdown.classList.add('hidden');
+    } else if (e.target.closest('.clear-history')) {
+        showClearHistoryModal();
+        dropdown.classList.add('hidden');
+    } else if (e.target.closest('.edit-kubeconfig')) {
+        showKubeconfigModal();
+        dropdown.classList.add('hidden');
+    } else if (e.target.closest('.delete-cluster')) {
+        showDeleteModal();
+        dropdown.classList.add('hidden');
+    }
+});
+
+// Rename modal functionality
+function showRenameModal() {
+    const newChatNameInput = document.getElementById('new-chat-name');
+    newChatNameInput.value = currentActionContext.clusterName;
+    renameModal.classList.remove('hidden');
+    newChatNameInput.focus();
+    newChatNameInput.select();
+}
+
+function hideRenameModal() {
+    renameModal.classList.add('hidden');
+    document.getElementById('rename-form').reset();
+}
+
+document.getElementById('close-rename-modal').addEventListener('click', hideRenameModal);
+document.getElementById('cancel-rename').addEventListener('click', hideRenameModal);
+
+document.getElementById('rename-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const newName = document.getElementById('new-chat-name').value.trim();
+    
+    if (!newName) return;
+    
+    try {
+        // API call to rename chat (replace with actual endpoint)
+        const response = await fetch(`/clusters/${currentActionContext.clusterId}/rename/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
+            },
+            body: JSON.stringify({ name: newName })
+        });
+        
+        if (response.ok) {
+            // Update UI
+            const sessionElement = document.querySelector(`[data-session-id="${currentActionContext.sessionId}"]`);
+            if (sessionElement) {
+                sessionElement.querySelector('span').textContent = newName;
+                sessionElement.dataset.clusterName = newName;
+            }
+            hideRenameModal();
+            showSuccessMessage('Chat renamed successfully!');
+        } else {
+            showErrorMessage('Failed to rename chat. Please try again.');
+        }
+    } catch (error) {
+        console.error('Rename error:', error);
+        showErrorMessage('Failed to rename chat. Please try again.');
+    }
+});
+
+// Clear history modal functionality
+function showClearHistoryModal() {
+    clearHistoryModal.classList.remove('hidden');
+}
+
+function hideClearHistoryModal() {
+    clearHistoryModal.classList.add('hidden');
+}
+
+document.getElementById('close-clear-modal').addEventListener('click', hideClearHistoryModal);
+document.getElementById('cancel-clear').addEventListener('click', hideClearHistoryModal);
+
+document.getElementById('confirm-clear').addEventListener('click', async () => {
+    try {
+        // API call to clear history (replace with actual endpoint)
+        const response = await fetch(`/terminal/${currentActionContext.sessionId}/clear-history/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
+            }
+        });
+        
+        if (response.ok) {
+            // Clear terminal UI
+            const terminalMessages = document.getElementById('terminal-messages');
+            const oldHistory = document.getElementById('old-history');
+            const currentSession = document.getElementById('current-session');
+            
+            if (oldHistory) oldHistory.innerHTML = '';
+            if (currentSession) currentSession.innerHTML = '';
+            
+            // Hide history toggle button
+            const historyToggleBtn = document.getElementById('history-toggle-btn');
+            if (historyToggleBtn) historyToggleBtn.classList.add('hidden');
+            
+            hideClearHistoryModal();
+            showSuccessMessage('Chat history cleared successfully.');
+        } else {
+            showErrorMessage('Failed to clear history. Please try again.');
+        }
+    } catch (error) {
+        console.error('Clear history error:', error);
+        showErrorMessage('Failed to clear history. Please try again.');
+    }
+});
+
+// Kubeconfig modal functionality
+function showKubeconfigModal() {
+    // Load current kubeconfig (replace with actual endpoint)
+    loadCurrentKubeconfig();
+    kubeconfigModal.classList.remove('hidden');
+}
+
+function hideKubeconfigModal() {
+    kubeconfigModal.classList.add('hidden');
+    document.getElementById('kubeconfig-form').reset();
+}
+
+async function loadCurrentKubeconfig() {
+    try {
+        const response = await fetch(`/clusters/${currentActionContext.clusterId}/kubeconfig/`);
+        if (response.ok) {
+            const data = await response.json();
+            document.getElementById('edit-kubeconfig').value = data.kubeconfig || '';
+        }
+    } catch (error) {
+        console.error('Failed to load kubeconfig:', error);
+    }
+}
+
+document.getElementById('close-kubeconfig-modal').addEventListener('click', hideKubeconfigModal);
+document.getElementById('cancel-kubeconfig').addEventListener('click', hideKubeconfigModal);
+
+document.getElementById('kubeconfig-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const kubeconfig = document.getElementById('edit-kubeconfig').value.trim();
+    
+    if (!kubeconfig) return;
+    
+    try {
+        // API call to update kubeconfig (replace with actual endpoint)
+        const response = await fetch(`/clusters/${currentActionContext.clusterId}/update-kubeconfig/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
+            },
+            body: JSON.stringify({ kubeconfig: kubeconfig })
+        });
+        
+        if (response.ok) {
+            hideKubeconfigModal();
+            showSuccessMessage('Kubeconfig updated successfully.');
+            
+            // Check connection status after kubeconfig update
+            setTimeout(() => {
+                checkConnectionStatus();
+            }, 1000); // Small delay to allow server to process
+        } else {
+            const data = await response.json();
+            showErrorMessage(`Failed to update kubeconfig: ${data.error || 'Unknown error'}`);
+        }
+    } catch (error) {
+        console.error('Update kubeconfig error:', error);
+        showErrorMessage('Failed to update kubeconfig. Please try again.');
+    }
+});
+
+// Delete modal functionality
+function showDeleteModal() {
+    deleteModal.classList.remove('hidden');
+}
+
+function hideDeleteModal() {
+    deleteModal.classList.add('hidden');
+}
+
+document.getElementById('close-delete-modal').addEventListener('click', hideDeleteModal);
+document.getElementById('cancel-delete').addEventListener('click', hideDeleteModal);
+
+document.getElementById('confirm-delete').addEventListener('click', async () => {
+    try {
+        // API call to delete chat (replace with actual endpoint)
+        const response = await fetch(`/clusters/${currentActionContext.clusterId}/delete/`, {
+            method: 'DELETE',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
+            }
+        });
+        
+        if (response.ok) {
+            // Remove from UI
+            const sessionElement = document.querySelector(`[data-session-id="${currentActionContext.sessionId}"]`);
+            if (sessionElement) {
+                sessionElement.closest('.group').remove();
+            }
+            
+            // If this was the current session, show welcome message
+            if (currentSessionId === currentActionContext.sessionId) {
+                currentSessionId = null;
+                const welcomeMessage = document.getElementById('welcome-message');
+                const terminalContainer = document.getElementById('terminal-container');
+                if (welcomeMessage && terminalContainer) {
+                    welcomeMessage.style.display = 'block';
+                    terminalContainer.classList.add('hidden');
+                }
+            }
+            
+            hideDeleteModal();
+            showSuccessMessage('Chat deleted successfully.');
+        } else {
+            showErrorMessage('Failed to delete chat. Please try again.');
+        }
+    } catch (error) {
+        console.error('Delete error:', error);
+        showErrorMessage('Failed to delete chat. Please try again.');
+    }
+});
+
+// Close modals when clicking outside
+[renameModal, clearHistoryModal, kubeconfigModal, deleteModal].forEach(modal => {
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            modal.classList.add('hidden');
+        }
+    });
 });
 
 function handleExecuteCommand(e) {
@@ -560,6 +931,14 @@ function interruptCurrentCommand() {
         currentCommandAbortController = null;
         appendTerminalMessage('info', '^C');
         setTerminalInputState(true);
+    } else {
+        // Even if no command is running, show the interrupt signal
+        appendTerminalMessage('info', '^C');
+        // Clear any processing state
+        const terminalInput = document.getElementById('terminal-input');
+        if (terminalInput && terminalInput.placeholder === 'Processing...') {
+        setTerminalInputState(true);
+        }
     }
 }
 
@@ -567,11 +946,13 @@ async function executeCommand(command, silent = false) {
     try {
         // Create abort controller for this command
         currentCommandAbortController = new AbortController();
+        console.log('Executing command:', command, 'Silent:', silent);
         
         const response = await fetch(`/terminal/${currentSessionId}/execute/`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
             },
             body: JSON.stringify({ command: command }),
             signal: currentCommandAbortController.signal
@@ -686,12 +1067,17 @@ function appendTerminalMessage(type, content, exitCode = null) {
     // Auto-scroll to bottom
     autoScrollToBottom();
     
-    // Trigger scroll button check after new content is added
+    // Immediately check scroll button after new content (force hide if not needed)
+    if (window.smartScrollChecker) {
+        window.smartScrollChecker();
+    }
+    
+    // Double-check after DOM updates
     setTimeout(() => {
         if (window.smartScrollChecker) {
             window.smartScrollChecker();
         }
-    }, 100);
+    }, 50);
 }
 
 async function updateCurrentPath() {
@@ -705,9 +1091,13 @@ async function updateCurrentPath() {
     }
 }
 
-async function switchToSession(sessionId, clusterName) {
+async function switchToSession(sessionId, clusterName, clusterId) {
+    // Stop previous connection monitoring
+    stopConnectionMonitoring();
+    
     currentSessionId = sessionId;
     currentClusterName = clusterName;
+    currentClusterId = clusterId;
     currentPath = '~';
     
     // Update UI
@@ -730,11 +1120,31 @@ async function switchToSession(sessionId, clusterName) {
     // Initialize scroll button now that terminal is visible
     initializeSmartScroll();
     
+        // Initialize direct positioning for new session  
+    setTimeout(() => {
+        console.log('🎯 Setting up textbox-top positioning');
+        
+        // Apply initial positioning
+        if (window.fixButtonPosition) {
+            window.fixButtonPosition();
+            console.log('✅ Initial positioning applied - button at textbox top');
+        }
+        
+        console.log('✅ Direct positioning ready - button at textbox top edge');
+        console.log('📝 Resize your browser window to test');
+    }, 300);
+    
     // Update active session in sidebar
     document.querySelectorAll('.cluster-session').forEach(session => {
-        session.classList.remove('bg-white/5');
+        session.classList.remove('bg-terminal-card/50');
     });
-    document.querySelector(`[data-session-id="${sessionId}"]`).classList.add('bg-white/5');
+    const activeSession = document.querySelector(`[data-session-id="${sessionId}"]`);
+    if (activeSession) {
+        activeSession.classList.add('bg-terminal-card/50');
+    }
+    
+    // Start connection monitoring for the new session
+    startConnectionMonitoring();
     
     // Load command history first (this will populate old history and show toggle button)
     await loadCommandHistory(sessionId);
@@ -745,6 +1155,12 @@ async function switchToSession(sessionId, clusterName) {
     
     // Focus on input
     terminalInput.focus();
+    
+    // Force initial connection status update
+    setTimeout(() => {
+        console.log('Forcing initial connection status check');
+        updateConnectionStatus('connecting', false);
+    }, 100);
 }
 
 async function loadCommandHistory(sessionId) {
@@ -915,7 +1331,7 @@ function handleKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
         terminalForm.dispatchEvent(new Event('submit'));
-    } else if (e.ctrlKey && e.key === 'c') {
+    } else if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
         e.preventDefault();
         // Send interrupt signal
         interruptCurrentCommand();
@@ -940,6 +1356,13 @@ function handleKeydown(e) {
 function toggleSidebar() {
   sidebar.classList.toggle('-translate-x-full');
   overlay.classList.toggle('hidden');
+  
+  // Prevent body scroll when sidebar is open on mobile
+  if (sidebar.classList.contains('-translate-x-full')) {
+    document.body.classList.remove('overflow-hidden');
+  } else {
+    document.body.classList.add('overflow-hidden');
+  }
 }
 
 function escapeHtml(text) {
@@ -949,7 +1372,141 @@ function escapeHtml(text) {
 }
 
 function getCsrfToken() {
-    return document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    // Try meta tag first
+    const metaToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+    if (metaToken) return metaToken;
+    
+    // Fallback to Django's csrf token from form
+    const formToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
+    if (formToken) return formToken;
+    
+    // Last resort - get from cookie
+    const cookieValue = document.cookie
+        .split('; ')
+        .find(row => row.startsWith('csrftoken='))
+        ?.split('=')[1];
+    
+    return cookieValue || '';
+}
+
+// Connection status management
+function updateConnectionStatus(status, isConnected) {
+    console.log('Updating connection status:', status, 'isConnected:', isConnected);
+    
+    const connectionIndicator = document.getElementById('connection-indicator');
+    const connectionPing = document.getElementById('connection-ping');
+    const connectionText = document.getElementById('connection-text');
+    
+    console.log('UI elements found:', {
+        indicator: !!connectionIndicator,
+        ping: !!connectionPing,
+        text: !!connectionText
+    });
+    
+    if (!connectionIndicator || !connectionText) {
+        console.error('Missing connection UI elements');
+        return;
+    }
+    
+    // Update UI elements
+    if (isConnected) {
+        connectionIndicator.className = 'w-3 h-3 bg-terminal-success rounded-full shadow-lg';
+        if (connectionPing) connectionPing.className = 'absolute inset-0 w-3 h-3 bg-terminal-success rounded-full animate-ping opacity-75';
+        connectionText.className = 'text-terminal-success font-medium';
+        connectionText.textContent = 'Connected';
+    } else if (status === 'error') {
+        connectionIndicator.className = 'w-3 h-3 bg-terminal-error rounded-full shadow-lg';
+        if (connectionPing) connectionPing.className = 'absolute inset-0 w-3 h-3 bg-terminal-error rounded-full animate-ping opacity-75';
+        connectionText.className = 'text-terminal-error font-medium';
+        connectionText.textContent = 'Error';
+    } else {
+        connectionIndicator.className = 'w-3 h-3 bg-terminal-warning rounded-full shadow-lg';
+        if (connectionPing) connectionPing.className = 'absolute inset-0 w-3 h-3 bg-terminal-warning rounded-full animate-ping opacity-75';
+        connectionText.className = 'text-terminal-warning font-medium';
+        connectionText.textContent = 'Connecting...';
+    }
+    
+    // Update sidebar status
+    const sessionElement = document.querySelector(`[data-session-id="${currentSessionId}"]`);
+    console.log('Session element found:', !!sessionElement, 'Session ID:', currentSessionId);
+    
+    if (sessionElement) {
+        const statusIndicator = sessionElement.querySelector('[class*="w-2.5"]');
+        const statusText = sessionElement.querySelector('.text-xs');
+        
+        console.log('Sidebar elements found:', {
+            indicator: !!statusIndicator,
+            text: !!statusText
+        });
+        
+        if (statusIndicator) {
+            if (isConnected) {
+                statusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-terminal-success shadow-sm';
+            } else if (status === 'error') {
+                statusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-terminal-error shadow-sm';
+            } else {
+                statusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-terminal-warning shadow-sm';
+            }
+        }
+        
+        if (statusText) {
+            statusText.textContent = isConnected ? 'Connected' : (status === 'error' ? 'Error' : 'Connecting');
+        }
+    }
+}
+
+async function checkConnectionStatus() {
+    if (!currentClusterId) {
+        console.log('No current cluster ID for connection check');
+        return;
+    }
+    
+    console.log('Checking connection status for cluster:', currentClusterId);
+    
+    try {
+        const response = await fetch(`/clusters/${currentClusterId}/status/`, {
+            method: 'GET',
+            headers: {
+                'X-CSRFToken': getCsrfToken()
+            }
+        });
+        
+        const data = await response.json();
+        console.log('Connection status response:', data);
+        
+        if (data.success) {
+            updateConnectionStatus(data.status, data.status === 'connected');
+        } else {
+            console.error('Connection check returned error:', data.error);
+            updateConnectionStatus('error', false);
+        }
+    } catch (error) {
+        console.error('Connection check failed:', error);
+        updateConnectionStatus('error', false);
+    }
+}
+
+function startConnectionMonitoring() {
+    // Clear any existing interval
+    if (connectionCheckInterval) {
+        clearInterval(connectionCheckInterval);
+    }
+    
+    console.log('Starting connection monitoring for cluster:', currentClusterId);
+    
+    // Check immediately
+    checkConnectionStatus();
+    
+    // Check every 2 minutes (120000 ms)
+    connectionCheckInterval = setInterval(checkConnectionStatus, 120000);
+    console.log('Connection monitoring started - checking every 2 minutes');
+}
+
+function stopConnectionMonitoring() {
+    if (connectionCheckInterval) {
+        clearInterval(connectionCheckInterval);
+        connectionCheckInterval = null;
+    }
 }
 
 // Nano-specific functions
@@ -1117,7 +1674,7 @@ function saveNanoFileDirect(filename, content, shouldExit = false) {
             }
         } else {
             // Handle save error
-            alert('Error: Could not save file');
+            showErrorMessage('Error: Could not save file');
             if (!shouldExit) {
                 document.getElementById('nano-content').focus();
             }
@@ -1125,7 +1682,7 @@ function saveNanoFileDirect(filename, content, shouldExit = false) {
     })
     .catch(error => {
         console.error('Save error:', error);
-        alert('Error: Save failed');
+        showErrorMessage('Error: Save failed');
         if (!shouldExit) {
             document.getElementById('nano-content').focus();
         }
@@ -1190,25 +1747,7 @@ function hideNanoExitPrompt() {
 
 
 function showNanoHelp() {
-    const helpText = `GNU nano 6.2 Help Text
-
-The nano editor is designed to emulate the functionality and ease-of-use of the UW Pico text editor.
-
-Main Commands:
-^G  (F1)     Display this help text
-^X  (F2)     Close the current file buffer / Exit from nano
-^O  (F3)     Write the current file to disk
-^R  (F5)     Insert another file into the current one
-^W  (F6)     Search for text
-^Y  (F7)     Move to the previous screen
-^V  (F8)     Move to the next screen
-^K  (F9)     Cut the current line and store it in the cutbuffer
-^U  (F10)    Uncut from the cutbuffer into the current line
-^T  (F12)    Invoke the spell checker, if available
-
-For more info, type 'man nano' in your terminal.`;
-    
-    alert(helpText);
+    showInfoMessage('Nano help: Use Ctrl+X to exit, Ctrl+O to save, Ctrl+W to search. See terminal shortcuts bar for more commands.');
 }
 
 function showNanoSearch(editor) {
@@ -1230,7 +1769,7 @@ function showNanoSearch(editor) {
             // Store search term for continued searching
             editor.lastSearchTerm = searchTerm;
         } else {
-            alert(`"${searchTerm}" not found`);
+            showInfoMessage(`"${searchTerm}" not found`);
         }
     }
 }
@@ -1240,7 +1779,7 @@ function insertFile(editor) {
     const filename = prompt('File to insert:');
     if (filename) {
         // In a real implementation, this would read the file
-        alert('Insert file functionality would read and insert the specified file here');
+        showInfoMessage('Insert file functionality not implemented yet');
     }
 }
 
@@ -1290,11 +1829,11 @@ function showCursorPosition(editor) {
     const totalLines = editor.value.split('\n').length;
     const totalChars = editor.value.length;
     
-    alert(`line ${line}/${totalLines} (${Math.round(line/totalLines*100)}%), col ${col}, char ${pos}/${totalChars} (${Math.round(pos/totalChars*100)}%)`);
+    showInfoMessage(`Line ${line}/${totalLines} (${Math.round(line/totalLines*100)}%), Col ${col}, Char ${pos}/${totalChars} (${Math.round(pos/totalChars*100)}%)`);
 }
 
 function spellCheck(editor) {
-    alert('Spell checker would be invoked here (requires external spell checking service)');
+    showInfoMessage('Spell checker not implemented yet');
 }
 
 function cutNanoLine(editor) {
@@ -1343,8 +1882,365 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initialize history handling
     initializeHistoryHandling();
     
+    // Global keyboard handler for Ctrl+C
+    document.addEventListener('keydown', (e) => {
+        if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
+            // Only interrupt if we're in the terminal area
+            const terminalContainer = document.getElementById('terminal-container');
+            if (terminalContainer && !terminalContainer.classList.contains('hidden')) {
+                e.preventDefault();
+                interruptCurrentCommand();
+            }
+        }
+    });
+    
     // Don't initialize smart scroll button until terminal is shown
 });
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+    stopConnectionMonitoring();
+});
+
+// Debug functions for manual testing
+window.testConnectionCheck = function() {
+    console.log('Manual connection check triggered');
+    if (!currentClusterId) {
+        console.error('No cluster ID set');
+        showErrorMessage('No active cluster session');
+        return;
+    }
+    
+    // Show loading state
+    updateConnectionStatus('connecting', false);
+    
+    // Trigger check
+    checkConnectionStatus();
+};
+
+    window.getCurrentConnectionInfo = function() {
+        console.log('Current connection info:', {
+            sessionId: currentSessionId,
+            clusterName: currentClusterName,
+            clusterId: currentClusterId,
+            monitoringActive: !!connectionCheckInterval
+        });
+        return {
+            sessionId: currentSessionId,
+            clusterName: currentClusterName,
+            clusterId: currentClusterId,
+            monitoringActive: !!connectionCheckInterval
+        };
+    };
+    
+    // SIMPLE VISUAL TEST - Show exactly where button is
+    window.showButtonPosition = function() {
+        const button = document.getElementById('smart-scroll-btn');
+        const terminalMessages = document.getElementById('terminal-messages');
+        const terminalContainer = document.getElementById('terminal-container');
+        
+        if (!button || (!terminalMessages && !terminalContainer)) {
+            console.log('❌ Button or chat area not found');
+            return;
+        }
+        
+        const buttonRect = button.getBoundingClientRect();
+        const chatRect = terminalMessages ? terminalMessages.getBoundingClientRect() : terminalContainer.getBoundingClientRect();
+        const chatCenter = chatRect.left + (chatRect.width / 2);
+        const buttonCenter = buttonRect.left + (buttonRect.width / 2);
+        
+        console.log('📍 VISUAL BUTTON POSITION:', {
+            buttonLeft: buttonRect.left,
+            buttonWidth: buttonRect.width,
+            buttonCenter: buttonCenter,
+            chatCenter: chatCenter,
+            chatLeft: chatRect.left,
+            chatWidth: chatRect.width,
+            difference: Math.abs(chatCenter - buttonCenter).toFixed(2) + 'px',
+            usingElement: terminalMessages ? 'terminal-messages' : 'terminal-container',
+            visuallyAppears: buttonCenter < chatCenter * 0.9 ? 'LEFT OF CHAT' : 
+                           buttonCenter > chatCenter * 1.1 ? 'RIGHT OF CHAT' : 'CHAT CENTER',
+            isActuallyCentered: Math.abs(chatCenter - buttonCenter) < 5 ? '✅ YES' : '❌ NO'
+        });
+        
+        // Show chat center line for 3 seconds
+        const centerLine = document.createElement('div');
+        centerLine.style.cssText = `
+            position: fixed;
+            left: ${chatCenter}px;
+            top: 0;
+            width: 2px;
+            height: 100vh;
+            background: red;
+            z-index: 999;
+            transform: translateX(-50%);
+            pointer-events: none;
+        `;
+        document.body.appendChild(centerLine);
+        
+        setTimeout(() => centerLine.remove(), 3000);
+        console.log('🔴 Red line shows true CHAT center for 3 seconds');
+    };
+    
+    // FORCE CHAT CENTER - Center button on chat area
+    window.forceChatCenter = function() {
+        console.log('🎯 FORCING SIMPLE CHAT CENTER...');
+        
+        const container = window.scrollButtonContainer || document.querySelector('.scroll-button-container');
+        const terminalInput = document.getElementById('terminal-input');
+        const terminalContainer = document.getElementById('terminal-container');
+        
+        if (!container || !terminalInput || !terminalContainer) {
+            console.error('❌ Elements not found');
+            return;
+        }
+        
+        const inputRect = terminalInput.getBoundingClientRect();
+        const terminalRect = terminalContainer.getBoundingClientRect();
+        const chatCenter = terminalRect.left + (terminalRect.width / 2);
+        const buttonY = inputRect.top - 50;
+        
+        // Apply chat-centered positioning
+        container.style.cssText = `
+            position: fixed !important;
+            left: ${chatCenter}px !important;
+            top: ${buttonY}px !important;
+            transform: translateX(-50%) !important;
+            z-index: 50 !important;
+            pointer-events: none !important;
+        `;
+        
+        console.log('✅ Applied chat center positioning');
+        
+        // Test immediately
+        setTimeout(() => {
+            window.showButtonPosition();
+        }, 100);
+    };
+    
+         // TEST RESIZE BEHAVIOR - Verify button stays chat-centered on resize
+     window.testResizeStability = function() {
+         console.log('🔄 TESTING AUTOMATIC RESIZE STABILITY...');
+         
+         // Record initial position using terminal-messages
+         const terminalMessages = document.getElementById('terminal-messages');
+         const button = document.getElementById('smart-scroll-btn');
+         
+         if (!terminalMessages || !button) {
+             console.error('❌ Required elements not found');
+             return;
+         }
+         
+         const initialMessagesRect = terminalMessages.getBoundingClientRect();
+         const initialButtonRect = button.getBoundingClientRect();
+         const initialChatCenter = initialMessagesRect.left + (initialMessagesRect.width / 2);
+         const initialButtonCenter = initialButtonRect.left + (initialButtonRect.width / 2);
+         
+         console.log('📐 INITIAL POSITION (terminal-messages):', {
+             chatCenter: initialChatCenter,
+             buttonCenter: initialButtonCenter,
+             difference: Math.abs(initialChatCenter - initialButtonCenter).toFixed(2) + 'px'
+         });
+         
+         // Trigger resize event
+         console.log('🔄 Simulating resize event...');
+         window.dispatchEvent(new Event('resize'));
+         
+         // Check position after auto-resize handling
+         setTimeout(() => {
+             const newMessagesRect = terminalMessages.getBoundingClientRect();
+             const newButtonRect = button.getBoundingClientRect();
+             const newChatCenter = newMessagesRect.left + (newMessagesRect.width / 2);
+             const newButtonCenter = newButtonRect.left + (newButtonRect.width / 2);
+             const finalDifference = Math.abs(newChatCenter - newButtonCenter);
+             
+             console.log('✅ POST-RESIZE POSITION:', {
+                 chatCenter: newChatCenter,
+                 buttonCenter: newButtonCenter,
+                 difference: finalDifference.toFixed(2) + 'px',
+                 autoResizeWorking: finalDifference < 2 ? '✅ YES - Auto-centering works perfectly!' : '❌ NO - Something is wrong',
+                 status: finalDifference < 2 ? 'No manual intervention needed!' : 'Check positionScrollButton() logic'
+             });
+         }, 300);
+     };
+     
+     // DEBUG CHAT CONTAINER - Find out what's wrong with positioning
+     window.debugChatContainer = function() {
+         console.log('🔍 DEBUGGING CHAT CONTAINER...');
+         
+         const terminalContainer = document.getElementById('terminal-container');
+         const terminalMessages = document.getElementById('terminal-messages');
+         const terminalInput = document.getElementById('terminal-input');
+         const button = document.getElementById('smart-scroll-btn');
+         
+         console.log('📊 ELEMENT ANALYSIS:', {
+             terminalContainer: terminalContainer ? {
+                 exists: true,
+                 rect: terminalContainer.getBoundingClientRect(),
+                 classes: terminalContainer.className,
+                 visible: !terminalContainer.classList.contains('hidden')
+             } : 'NOT FOUND',
+             
+             terminalMessages: terminalMessages ? {
+                 exists: true,
+                 rect: terminalMessages.getBoundingClientRect(),
+                 classes: terminalMessages.className
+             } : 'NOT FOUND',
+             
+             terminalInput: terminalInput ? {
+                 exists: true,
+                 rect: terminalInput.getBoundingClientRect(),
+                 classes: terminalInput.className
+             } : 'NOT FOUND',
+             
+             button: button ? {
+                 exists: true,
+                 rect: button.getBoundingClientRect(),
+                 container: button.parentElement ? button.parentElement.getBoundingClientRect() : 'NO PARENT'
+             } : 'NOT FOUND'
+         });
+         
+         // Try to find the actual chat area
+         const possibleChatAreas = [
+             document.querySelector('.terminal-container'),
+             document.querySelector('[class*="terminal"]'),
+             document.querySelector('[class*="chat"]'),
+             document.querySelector('main'),
+             document.querySelector('.main-content'),
+             terminalMessages?.parentElement,
+             terminalInput?.parentElement
+         ].filter(el => el !== null);
+         
+         console.log('🎯 POSSIBLE CHAT AREAS FOUND:', possibleChatAreas.map(el => ({
+             element: el.tagName + (el.id ? '#' + el.id : '') + (el.className ? '.' + el.className.split(' ')[0] : ''),
+             rect: el.getBoundingClientRect(),
+             isVisible: el.offsetWidth > 0 && el.offsetHeight > 0
+         })));
+     };
+     
+     // FORCE CORRECT CHAT CENTER - Use terminal messages area instead
+     window.forceCorrectChatCenter = function() {
+         console.log('🎯 FORCING CORRECT CHAT CENTER...');
+         
+         const container = window.scrollButtonContainer || document.querySelector('.scroll-button-container');
+         const terminalInput = document.getElementById('terminal-input');
+         const terminalMessages = document.getElementById('terminal-messages');
+         
+         if (!container || !terminalInput || !terminalMessages) {
+             console.error('❌ Elements not found');
+             return;
+         }
+         
+         // Use terminal messages area as the true chat area
+         const messagesRect = terminalMessages.getBoundingClientRect();
+         const inputRect = terminalInput.getBoundingClientRect();
+         
+         // Calculate center of the messages area (the actual chat)
+         const trueChatCenter = messagesRect.left + (messagesRect.width / 2);
+         const buttonY = inputRect.top - 50;
+         
+         console.log('📐 TRUE CHAT CENTER CALCULATION:', {
+             messagesArea: {
+                 left: messagesRect.left,
+                 width: messagesRect.width,
+                 center: trueChatCenter
+             },
+             inputTop: inputRect.top,
+             buttonY: buttonY
+         });
+         
+         // Apply true chat-centered positioning
+         container.style.cssText = `
+             position: fixed !important;
+             left: ${trueChatCenter}px !important;
+             top: ${buttonY}px !important;
+             transform: translateX(-50%) !important;
+             z-index: 50 !important;
+             pointer-events: none !important;
+         `;
+         
+         console.log('✅ Applied TRUE chat center positioning');
+         
+         // Test immediately
+         setTimeout(() => {
+             window.showButtonPosition();
+         }, 100);
+     };
+     
+
+     
+     // BULLETPROOF SYSTEM RESET - Complete reset and test
+     window.resetPositioning = function() {
+         console.log('🔄 RESETTING BULLETPROOF POSITIONING SYSTEM...');
+         
+         const currentScrollButton = document.getElementById('smart-scroll-btn');
+         if (currentScrollButton && !currentScrollButton.classList.contains('hidden')) {
+             // Apply bulletproof positioning
+             if (window.forceButtonCenter) {
+                 window.forceButtonCenter();
+             } else {
+                 positionScrollButton();
+             }
+             console.log('✅ Bulletproof positioning reset');
+             
+             // Reinstall resize handler
+             if (window.installResizeHandler) {
+                 window.installResizeHandler();
+                 console.log('✅ Bulletproof resize handler reset');
+             }
+             
+             // Comprehensive test
+             setTimeout(() => {
+                 console.log('🧪 TESTING RESET SYSTEM...');
+                 window.testQuickResize();
+             }, 400);
+         } else {
+             console.log('❌ No scroll button to reset');
+         }
+     };
+     
+     // FORCE BUTTON REFRESH - Apply bulletproof positioning
+     window.refreshButtonPosition = function() {
+         console.log('🔄 FORCING BUTTON POSITION REFRESH...');
+         
+         const currentScrollButton = document.getElementById('smart-scroll-btn');
+         if (currentScrollButton && !currentScrollButton.classList.contains('hidden')) {
+             // Use the bulletproof positioning system
+             if (window.forceButtonCenter) {
+                 const success = window.forceButtonCenter();
+                 if (success) {
+                     console.log('✅ Position refreshed with bulletproof system');
+                     // Quick verification
+                     setTimeout(() => {
+                         window.checkButtonStatus();
+                     }, 200);
+                 } else {
+                     console.warn('⚠️ Bulletproof positioning failed, using fallback');
+                     positionScrollButton();
+                 }
+             } else {
+                 console.warn('⚠️ Bulletproof system not available, using fallback');
+                 positionScrollButton();
+             }
+         } else {
+             console.log('❌ No scroll button to reposition');
+         }
+     };
+     
+
+     
+
+
+ window.forceConnectionRefresh = function() {
+    console.log('Forcing connection refresh...');
+    stopConnectionMonitoring();
+    if (currentClusterId) {
+        startConnectionMonitoring();
+        showInfoMessage('Connection status refreshed');
+    } else {
+        showErrorMessage('No active cluster session');
+    }
+};
 
 // Initialize history handling
 function initializeHistoryHandling() {
@@ -1377,13 +2273,13 @@ function initializeHistoryHandling() {
             oldHistory.classList.add('hidden');
             historyText.textContent = 'Show History';
             historyIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />';
-            
-            // When hiding history, restore previous scroll position or go to bottom
-            setTimeout(() => {
-                if (terminalMessages) {
-                    terminalMessages.scrollTop = terminalMessages.scrollHeight;
-                }
-            }, 100);
+        
+            // When hiding history, simply scroll to bottom and let smart logic handle button
+        setTimeout(() => {
+            if (terminalMessages) {
+                terminalMessages.scrollTop = terminalMessages.scrollHeight;
+            }
+        }, 100);
         }
         
         // Update scroll button after toggle
@@ -1391,20 +2287,26 @@ function initializeHistoryHandling() {
             if (window.smartScrollChecker) {
                 window.smartScrollChecker();
             }
-        }, 150);
+        }, 200);
     });
 }
 
 // Initialize smart scroll functionality (bidirectional)
-function initializeSmartScroll() {
+    function initializeSmartScroll() {
     const terminalMessages = document.getElementById('terminal-messages');
-    const scrollButton = document.getElementById('smart-scroll-btn');
-    const scrollIcon = document.getElementById('scroll-icon');
-    const scrollTooltipText = document.getElementById('scroll-tooltip-text');
-      
-    if (!terminalMessages || !scrollButton || !scrollIcon || !scrollTooltipText) {
+        const scrollButton = document.getElementById('smart-scroll-btn');
+        const scrollIcon = document.getElementById('scroll-icon');
+        const scrollIndicatorText = document.getElementById('scroll-indicator-text');
+        const scrollButtonContainer = document.querySelector('.scroll-button-container');
+          
+        if (!terminalMessages || !scrollButton || !scrollIcon || !scrollButtonContainer) {
         return;
     }
+    
+        // Set up global reference for positioning
+        window.scrollButtonContainer = scrollButtonContainer;
+        
+        console.log('🎯 INITIALIZING SCROLL BUTTON WITH CHAT CENTER POSITIONING');
     
     let currentScrollDirection = 'down'; // 'up' or 'down'
     
@@ -1413,82 +2315,117 @@ function initializeSmartScroll() {
         if (direction === 'down') {
             // Scroll down arrow
             scrollIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 13.5 12 21m0 0-7.5-7.5M12 21V3" />';
-            scrollTooltipText.textContent = 'Scroll to bottom';
             scrollIcon.style.transform = 'rotate(0deg)';
+            if (scrollIndicatorText) scrollIndicatorText.textContent = 'Jump to latest messages';
         } else {
             // Scroll up arrow
             scrollIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5 12 3m0 0 7.5 7.5M12 3v18" />';
-            scrollTooltipText.textContent = 'Scroll to top';
             scrollIcon.style.transform = 'rotate(0deg)';
+            if (scrollIndicatorText) scrollIndicatorText.textContent = 'Jump to older messages';
         }
         currentScrollDirection = direction;
     }
     
-    // Check scroll position and determine button behavior
+    // Intelligent scroll button - only appears when content actually needs scrolling
     function checkScrollPosition() {
-        // Get scroll measurements
-        const terminalScrollHeight = terminalMessages.scrollHeight;
-        const terminalClientHeight = terminalMessages.clientHeight;
-        const terminalScrollTop = terminalMessages.scrollTop;
+        // Force reflow to get accurate measurements after DOM changes
+        terminalMessages.offsetHeight;
         
-        // Check if there are child elements that exceed the container
-        const childrenHeight = Array.from(terminalMessages.children).reduce((total, child) => {
-            return total + child.offsetHeight;
-        }, 0);
+        // Get fresh scroll measurements
+        const scrollHeight = terminalMessages.scrollHeight;
+        const clientHeight = terminalMessages.clientHeight;
+        const scrollTop = terminalMessages.scrollTop;
         
-        const hasScrollableContent = terminalScrollHeight > terminalClientHeight + 5 || childrenHeight > terminalClientHeight + 5 || terminalMessages.children.length > 3;
+        // FUNDAMENTAL CHECK: Does content actually require scrolling?
+        const needsScrolling = scrollHeight > clientHeight + 20; // 20px buffer
         
-        // Debug logs (can be removed in production)
-        // console.log('=== Scroll Check Debug ===');
-        // console.log('Terminal scrollHeight:', terminalScrollHeight);
-        // console.log('Terminal clientHeight:', terminalClientHeight);
-        
-        if (!hasScrollableContent) {
+        // ALWAYS HIDE BUTTON FIRST - then decide if we should show it
             scrollButton.classList.add('hidden');
+        scrollButton.style.display = 'none';
+        
+        if (!needsScrolling) {
+            // Content fits perfectly - no scrolling needed, keep button hidden
             return;
         }
-        const distanceFromBottom = terminalScrollHeight - terminalScrollTop - terminalClientHeight;
-        const distanceFromTop = terminalScrollTop;
         
-        // Thresholds for determining position
-        const topThreshold = 10;
-        const bottomThreshold = 10;
+        // Content is long enough to require scrolling - determine position
+        const maxScroll = scrollHeight - clientHeight;
+        const scrollPercent = maxScroll > 0 ? scrollTop / maxScroll : 0;
+        const distanceFromBottom = maxScroll - scrollTop;
         
-        const isAtTop = distanceFromTop <= topThreshold;
-        const isAtBottom = distanceFromBottom <= bottomThreshold;
+        // Position thresholds (more forgiving)
+        const isAtVeryTop = scrollTop <= 30;
+        const isAtVeryBottom = distanceFromBottom <= 30;
         
-        // console.log('Checking scroll position:', { distanceFromBottom, distanceFromTop, isAtTop, isAtBottom });
-        
-        // Show button and set direction based on position
-        if (isAtTop && !isAtBottom) {
-            // At top - show scroll down button
+        if (isAtVeryTop) {
+            // At top of scrollable content - show down arrow (go to latest)
             updateButtonAppearance('down');
             showScrollButton();
-        } else if (isAtBottom && !isAtTop) {
-            // At bottom - show scroll up button
+        } else if (isAtVeryBottom) {
+            // At bottom of scrollable content - show up arrow (go to older content)
             updateButtonAppearance('up');
             showScrollButton();
-        } else if (!isAtTop && !isAtBottom) {
-            // In middle - determine direction based on which end is closer
-            const scrollProgress = terminalScrollTop / (terminalScrollHeight - terminalClientHeight);
-            
-            if (scrollProgress < 0.5) {
-                // Closer to top - suggest scrolling down
+        } else {
+            // In middle of scrollable content - intelligent direction
+            if (scrollPercent < 0.4) {
+                // Upper portion - suggest going to latest content
                 updateButtonAppearance('down');
             } else {
-                // Closer to bottom - suggest scrolling up
+                // Lower portion - suggest going to older content
                 updateButtonAppearance('up');
             }
             showScrollButton();
-        } else {
-            // Edge case or no scrollable content
-            scrollButton.classList.add('hidden');
         }
     }
     
     function showScrollButton() {
+        // Don't reposition if scroll is in progress
+        if (window.scrollInProgress) {
+            return;
+        }
+        
+        // Double-check that content actually needs scrolling before showing
+        const scrollHeight = terminalMessages.scrollHeight;
+        const clientHeight = terminalMessages.clientHeight;
+        const needsScrolling = scrollHeight > clientHeight + 20;
+        
+        if (!needsScrolling) {
+            // Content doesn't need scrolling - force hide and return
+            scrollButton.classList.add('hidden');
+            scrollButton.style.display = 'none';
+            return;
+        }
+        
+        // Position the button intelligently relative to the terminal
+        positionScrollButton();
+        
+        // Content needs scrolling - safe to show button with animation
         scrollButton.classList.remove('hidden');
         scrollButton.style.display = 'block';
+        
+        // Trigger slide-down animation
+        scrollButton.classList.remove('scroll-button-show');
+        setTimeout(() => {
+            scrollButton.classList.add('scroll-button-show');
+        }, 10);
+    }
+    
+    function positionScrollButton() {
+        // Don't reposition if scroll is in progress
+        if (window.scrollInProgress) {
+            console.log('⏸️ Skipping repositioning - scroll in progress');
+            return;
+        }
+        
+        // Use the direct positioning system
+        if (window.fixButtonPosition) {
+            console.log('🎯 Using direct positioning system');
+            window.fixButtonPosition();
+            return true;
+        }
+        
+        console.warn('⚠️ Direct positioning system not available');
+        return false;
     }
     
     // Button click handler
@@ -1508,12 +2445,106 @@ function initializeSmartScroll() {
         }
     });
     
-    // Check position on scroll
-    terminalMessages.addEventListener('scroll', checkScrollPosition);
+    // Check position on scroll (but not during programmatic scrolling)
+    terminalMessages.addEventListener('scroll', () => {
+        if (!window.scrollInProgress) {
+            checkScrollPosition();
+        }
+    });
     
     // Check position when content changes
-    const observer = new MutationObserver(checkScrollPosition);
+    const observer = new MutationObserver(() => {
+        if (!window.scrollInProgress) {
+            checkScrollPosition();
+            // Ensure button stays centered when content changes
+            setTimeout(() => {
+                if (!window.buttonPositionLocked) {
+                    positionScrollButton();
+                }
+            }, 100);
+        }
+    });
     observer.observe(terminalMessages, { childList: true, subtree: true });
+    
+         // DIRECT CHAT BUTTON CENTERING - POSITIONED AT TEXTBOX TOP
+     function positionButtonInChatCenter() {
+         const container = document.querySelector('.scroll-button-container');
+         const chat = document.getElementById('terminal-messages');
+         const textbox = document.getElementById('terminal-input');
+         
+         if (!container || !chat || !textbox) return;
+         
+         const chatRect = chat.getBoundingClientRect();
+         const textboxRect = textbox.getBoundingClientRect();
+         
+         // Horizontal: Center of chat area
+         const centerX = chatRect.left + (chatRect.width / 2);
+         
+         // Vertical: Top edge of textbox minus button height (32px) minus small gap (8px)
+         const topY = textboxRect.top - 40;
+         
+         // Direct positioning
+         container.style.left = (centerX - 16) + 'px'; // Center horizontally
+         container.style.top = topY + 'px'; // Position at textbox top
+         container.style.bottom = 'auto'; // Remove bottom positioning
+         
+         console.log('✅ Button positioned - X:', centerX, 'Y:', topY);
+     }
+     
+     // Position immediately and on resize
+     positionButtonInChatCenter();
+     
+     window.addEventListener('resize', () => {
+         setTimeout(positionButtonInChatCenter, 50);
+     });
+     
+     // Global function for manual testing
+     window.fixButtonPosition = positionButtonInChatCenter;
+     
+     console.log('✅ Direct positioning active - button will stay centered');
+    
+         // Monitor terminal container and input changes
+     const terminalContainer = document.getElementById('terminal-container');
+     const terminalInput = document.getElementById('terminal-input');
+     
+     if (terminalContainer) {
+         const terminalObserver = new MutationObserver(() => {
+             // Only reposition if not scrolling
+             if (window.scrollInProgress) return;
+             
+             const currentScrollButton = document.getElementById('smart-scroll-btn');
+             if (currentScrollButton && !currentScrollButton.classList.contains('hidden')) {
+                 setTimeout(() => {
+                     console.log('🔄 Terminal changed - repositioning button');
+                     if (window.fixButtonPosition) {
+                         window.fixButtonPosition();
+                     }
+                 }, 50);
+             }
+         });
+         terminalObserver.observe(terminalContainer, { 
+             attributes: true, 
+             attributeFilter: ['class', 'style'] 
+         });
+     }
+     
+     // Also monitor textbox for position changes
+     if (terminalInput) {
+         const inputObserver = new ResizeObserver(() => {
+             if (window.scrollInProgress) return;
+             
+             const currentScrollButton = document.getElementById('smart-scroll-btn');
+             if (currentScrollButton && !currentScrollButton.classList.contains('hidden')) {
+                 setTimeout(() => {
+                     console.log('🔄 Textbox resized - repositioning button');
+                     if (window.fixButtonPosition) {
+                         window.fixButtonPosition();
+                     }
+                 }, 50);
+             }
+         });
+         inputObserver.observe(terminalInput);
+     }
     
     // Expose checker function globally for manual triggers
     window.smartScrollChecker = checkScrollPosition;
@@ -1531,11 +2562,631 @@ function initializeSmartScroll() {
             clientHeight: terminalMessages?.clientHeight,
             scrollTop: terminalMessages?.scrollTop
         });
-        checkScrollPosition();
+    checkScrollPosition();
+    };
+    
+    window.forceHideScrollButton = function() {
+        console.log('Force hiding scroll button');
+        scrollButton.classList.add('hidden');
+    };
+    
+    window.checkScrollState = function() {
+        const scrollHeight = terminalMessages.scrollHeight;
+        const clientHeight = terminalMessages.clientHeight;
+        const scrollTop = terminalMessages.scrollTop;
+        const needsScrolling = scrollHeight > clientHeight + 20;
+        const maxScroll = scrollHeight - clientHeight;
+        const distanceFromBottom = maxScroll - scrollTop;
+        const distanceFromTop = scrollTop;
+        const isAtTop = distanceFromTop <= 30;
+        const isAtBottom = distanceFromBottom <= 30;
+        
+        console.log('Smart scroll analysis:', {
+            scrollHeight,
+            clientHeight,
+            scrollTop,
+            needsScrolling,
+            distanceFromTop,
+            distanceFromBottom,
+            isAtTop,
+            isAtBottom,
+            buttonVisible: !scrollButton.classList.contains('hidden'),
+            expectedDirection: isAtTop ? 'down' : isAtBottom ? 'up' : 'varies',
+            buttonPosition: {
+                bottom: scrollButtonContainer.style.bottom,
+                left: scrollButtonContainer.style.left,
+                centered: 'precisely centered on top edge of textbox',
+                transform: scrollButtonContainer.style.transform
+            }
+        });
+        return { needsScrolling, isAtTop, isAtBottom };
+    };
+    
+    window.repositionScrollButton = function() {
+        console.log('Manually repositioning scroll button');
+        positionScrollButton();
+    };
+    
+    // Test function to verify perfect centering
+    window.testButtonCentering = function() {
+        const terminalInput = document.getElementById('terminal-input');
+        const scrollButtonContainer = document.querySelector('.scroll-button-container');
+        const scrollButton = document.getElementById('smart-scroll-btn');
+        
+        if (!terminalInput || !scrollButtonContainer || !scrollButton) {
+            console.error('Elements not found:', {
+                terminalInput: !!terminalInput,
+                scrollButtonContainer: !!scrollButtonContainer,
+                scrollButton: !!scrollButton
+            });
+            return;
+        }
+        
+        const inputRect = terminalInput.getBoundingClientRect();
+        const buttonRect = scrollButton.getBoundingClientRect();
+        
+        const inputCenter = inputRect.left + (inputRect.width / 2);
+        const buttonCenter = buttonRect.left + (buttonRect.width / 2);
+        const centerDifference = Math.abs(inputCenter - buttonCenter);
+        
+        console.log('Detailed centering test:', {
+            textboxInfo: {
+                left: inputRect.left,
+                width: inputRect.width,
+                center: inputCenter,
+                centerPercentage: ((inputCenter / window.innerWidth) * 100).toFixed(1) + '%'
+            },
+            buttonInfo: {
+                left: buttonRect.left,
+                width: buttonRect.width,
+                center: buttonCenter,
+                centerPercentage: ((buttonCenter / window.innerWidth) * 100).toFixed(1) + '%'
+            },
+            comparison: {
+                difference: centerDifference.toFixed(2) + 'px',
+                isPerfectlyCentered: centerDifference < 1,
+                status: centerDifference < 1 ? 'CENTERED' : 'OFF-CENTER'
+            },
+            containerStyles: {
+                left: scrollButtonContainer.style.left,
+                transform: scrollButtonContainer.style.transform,
+                position: scrollButtonContainer.style.position
+            }
+        });
+        
+        return centerDifference < 1;
+    };
+    
+    // Force perfect centering function
+    window.forceButtonCenter = function() {
+        console.log('Forcing button to perfect center...');
+        
+        const terminalInput = document.getElementById('terminal-input');
+        const scrollButtonContainer = document.querySelector('.scroll-button-container');
+        const scrollButton = document.getElementById('smart-scroll-btn');
+        
+        if (!terminalInput || !scrollButtonContainer || !scrollButton) {
+            console.error('Required elements not found');
+            return;
+        }
+        
+        const inputRect = terminalInput.getBoundingClientRect();
+        const inputCenterX = inputRect.left + (inputRect.width / 2);
+        const inputTopY = inputRect.top;
+        const bottom = window.innerHeight - inputTopY;
+        
+        console.log('Manual centering calculation:', {
+            inputLeft: inputRect.left,
+            inputWidth: inputRect.width,
+            inputCenter: inputCenterX,
+            inputTop: inputTopY,
+            bottomDistance: bottom
+        });
+        
+        // Remove the container and recreate it to eliminate any style conflicts
+        const newContainer = document.createElement('div');
+        newContainer.className = 'scroll-button-container';
+        newContainer.style.cssText = `
+            position: fixed !important;
+            left: ${inputCenterX}px !important;
+            bottom: ${bottom}px !important;
+            transform: translate(-50%, -50%) !important;
+            z-index: 50 !important;
+            pointer-events: none !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            width: auto !important;
+            height: auto !important;
+        `;
+        
+        // Move the button to the new container
+        newContainer.appendChild(scrollButton);
+        
+        // Replace the old container
+        scrollButtonContainer.parentNode.replaceChild(newContainer, scrollButtonContainer);
+        
+        // Update the global reference
+        window.scrollButtonContainer = newContainer;
+        
+        console.log('Button container recreated and repositioned');
+        
+        // Test the result
+        setTimeout(() => {
+            window.testButtonCentering();
+        }, 50);
+    };
+    
+    // Visual debug helper
+    window.showTextboxCenter = function() {
+        const terminalInput = document.getElementById('terminal-input');
+        if (!terminalInput) return;
+        
+        // Remove any existing markers
+        document.querySelectorAll('.center-marker').forEach(el => el.remove());
+        
+        const inputRect = terminalInput.getBoundingClientRect();
+        const inputCenterX = inputRect.left + (inputRect.width / 2);
+        const inputTopY = inputRect.top;
+        
+        // Create a visual marker at the exact center
+        const marker = document.createElement('div');
+        marker.className = 'center-marker';
+        marker.style.cssText = `
+            position: fixed;
+            left: ${inputCenterX}px;
+            top: ${inputTopY}px;
+            width: 4px;
+            height: 20px;
+            background: red;
+            z-index: 100;
+            transform: translateX(-50%);
+            pointer-events: none;
+        `;
+        document.body.appendChild(marker);
+        
+        console.log('🔴 Red marker placed at textbox center:', inputCenterX);
+        
+        // Remove marker after 5 seconds
+        setTimeout(() => marker.remove(), 5000);
+    };
+    
+    // Simple test - just show where the button SHOULD be
+    window.showWhereButtonShouldBe = function() {
+        const terminalInput = document.getElementById('terminal-input');
+        if (!terminalInput) return;
+        
+        const inputRect = terminalInput.getBoundingClientRect();
+        const inputCenterX = inputRect.left + (inputRect.width / 2);
+        const inputTopY = inputRect.top;
+        
+        // Remove existing test buttons
+        document.querySelectorAll('.test-button').forEach(el => el.remove());
+        
+        // Create a test button at EXACT position
+        const testButton = document.createElement('div');
+        testButton.className = 'test-button';
+        testButton.innerHTML = '📍';
+        testButton.style.cssText = `
+            position: fixed !important;
+            left: ${inputCenterX}px !important;
+            top: ${inputTopY}px !important;
+            transform: translate(-50%, -50%) !important;
+            z-index: 999 !important;
+            background: yellow !important;
+            border: 2px solid red !important;
+            width: 32px !important;
+            height: 32px !important;
+            border-radius: 50% !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            font-size: 16px !important;
+            pointer-events: none !important;
+        `;
+        
+        document.body.appendChild(testButton);
+        
+        console.log('📍 YELLOW TEST BUTTON shows where scroll button should be');
+        console.log('Center calculated at:', inputCenterX);
+        
+        // Remove after 10 seconds
+        setTimeout(() => testButton.remove(), 10000);
+    };
+    
+    // FORCE CENTER BUTTON AT TOP OF TEXTBOX (recreates button with stable positioning)
+    window.fixButtonNow = function() {
+        console.log('🎯 FORCING BUTTON RECREATION AT TEXTBOX CENTER...');
+        
+        // Clear any scroll state
+        window.scrollInProgress = false;
+        
+        const terminalContainer = document.getElementById('terminal-container');
+        const terminalInput = document.getElementById('terminal-input');
+        
+        if (!terminalContainer || !terminalInput) {
+            console.error('❌ Required elements not found');
+            return;
+        }
+        
+        // Remove any existing button/container
+        const existingButton = document.getElementById('smart-scroll-btn');
+        const existingContainer = document.querySelector('.scroll-button-container');
+        if (existingButton) existingButton.remove();
+        if (existingContainer) existingContainer.remove();
+        
+        // Get actual chat messages area and textbox position (same as auto positioning)
+        const terminalMessages = document.getElementById('terminal-messages');
+        const inputRect = terminalInput.getBoundingClientRect();
+        
+        if (!terminalMessages) {
+            console.error('❌ Terminal messages element not found for fixButtonNow');
+            return;
+        }
+        
+        const messagesRect = terminalMessages.getBoundingClientRect();
+        const chatCenterX = messagesRect.left + (messagesRect.width / 2);
+        const buttonY = inputRect.top - 50;
+        
+        console.log('📐 CHAT CENTER POSITIONING:', {
+            inputTop: inputRect.top,
+            chatCenterX: chatCenterX,
+            buttonY: buttonY,
+            approach: 'Centering on chat area, not entire page'
+        });
+        
+        // Create new button structure
+        const newContainer = document.createElement('div');
+        newContainer.className = 'scroll-button-container';
+        
+        const newButton = document.createElement('button');
+        newButton.id = 'smart-scroll-btn';
+        newButton.className = 'glass-effect hover:bg-terminal-accent/10 text-terminal-accent border border-terminal-accent/30 hover:border-terminal-accent/50 w-8 h-8 rounded-full shadow-xl backdrop-blur-md transition-all duration-300 ease-out hover:scale-105 group flex items-center justify-center';
+        
+        newButton.innerHTML = `
+            <svg id="scroll-icon" class="w-4 h-4 transition-transform duration-300" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 13.5 12 21m0 0-7.5-7.5M12 21V3" />
+            </svg>
+            <div id="scroll-indicator" class="absolute -top-8 left-1/2 transform -translate-x-1/2 bg-terminal-surface/95 border border-terminal-accent/20 text-terminal-text text-xs px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-all duration-200 whitespace-nowrap shadow-lg backdrop-blur-sm">
+                <span id="scroll-indicator-text">Click to scroll</span>
+                <div class="absolute -bottom-1 left-1/2 transform -translate-x-1/2 w-2 h-2 bg-terminal-surface/95 border-r border-b border-terminal-accent/20 rotate-45"></div>
+            </div>
+        `;
+        
+        // Position at CENTER of chat area (chat-specific centering)
+        newContainer.style.cssText = `
+            position: fixed !important;
+            left: ${chatCenterX}px !important;
+            top: ${buttonY}px !important;
+            transform: translateX(-50%) !important;
+            z-index: 50 !important;
+            pointer-events: none !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        `;
+        
+        newButton.style.cssText = `
+            pointer-events: auto !important;
+            position: relative !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        `;
+        
+        // Add to page
+        newContainer.appendChild(newButton);
+        document.body.appendChild(newContainer);
+        
+        // Update global reference
+        window.scrollButtonContainer = newContainer;
+        
+                         console.log('✨ BUTTON CREATED AT CHAT CENTER!');
+         
+         // Add click functionality
+        newButton.addEventListener('click', function() {
+            console.log('🔥 Button clicked - preventing repositioning during scroll');
+            
+            // Prevent repositioning during scroll
+            window.scrollInProgress = true;
+            
+            const terminalMessages = document.getElementById('terminal-messages');
+            if (terminalMessages) {
+                if (newButton.querySelector('#scroll-icon path').getAttribute('d').includes('M19.5 13.5')) {
+                    // Scroll down
+                    terminalMessages.scrollTo({
+                        top: terminalMessages.scrollHeight,
+                        behavior: 'smooth'
+                    });
+                } else {
+                    // Scroll up
+                    terminalMessages.scrollTo({
+                        top: 0,
+                        behavior: 'smooth'
+                    });
+                }
+            }
+            
+            // Re-enable repositioning after scroll completes
+            setTimeout(() => {
+                window.scrollInProgress = false;
+                console.log('✅ Scroll complete - repositioning re-enabled');
+            }, 1000);
+        });
+        
+        // Test final position
+        setTimeout(() => {
+            const buttonRect = newButton.getBoundingClientRect();
+            const buttonCenter = buttonRect.left + (buttonRect.width / 2);
+            const difference = Math.abs(chatCenterX - buttonCenter);
+            
+            console.log('🎯 FINAL VERIFICATION:', {
+                expectedChatCenter: chatCenterX,
+                actualButtonCenter: buttonCenter,
+                difference: difference.toFixed(2) + 'px',
+                isCentered: difference < 1 ? '✅ PERFECTLY CENTERED ON CHAT!' : '❌ Still off-center'
+            });
+        }, 100);
+        
+        return newButton;
+    };
+    
+    // Complete verification of button positioning implementation
+    window.checkButtonPositioning = function() {
+        console.log('🔍 COMPREHENSIVE BUTTON POSITIONING CHECK...');
+        
+        const terminalInput = document.getElementById('terminal-input');
+        const button = document.getElementById('smart-scroll-btn');
+        const container = window.scrollButtonContainer;
+        
+        if (!terminalInput || !button || !container) {
+            console.error('❌ MISSING ELEMENTS:', {
+                terminalInput: !!terminalInput,
+                button: !!button,
+                container: !!container
+            });
+            return;
+        }
+        
+        const inputRect = terminalInput.getBoundingClientRect();
+        const buttonRect = button.getBoundingClientRect();
+        const expectedCenter = inputRect.left + (inputRect.width / 2);
+        const actualCenter = buttonRect.left + (buttonRect.width / 2);
+        const centerDifference = Math.abs(expectedCenter - actualCenter);
+        const verticalGap = inputRect.top - buttonRect.bottom;
+        
+        // Check positioning accuracy
+        const isWellCentered = centerDifference < 2;
+        const isWellPositioned = verticalGap > 20 && verticalGap < 80;
+        
+        console.log('📊 POSITIONING ANALYSIS:', {
+            // Horizontal positioning
+            horizontalAlignment: {
+                textboxCenter: expectedCenter.toFixed(1),
+                buttonCenter: actualCenter.toFixed(1),
+                difference: centerDifference.toFixed(2) + 'px',
+                status: isWellCentered ? '✅ WELL CENTERED' : '❌ OFF-CENTER'
+            },
+            
+            // Vertical positioning
+            verticalAlignment: {
+                gapAboveTextbox: verticalGap.toFixed(0) + 'px',
+                buttonTop: buttonRect.top.toFixed(1),
+                textboxTop: inputRect.top.toFixed(1),
+                status: isWellPositioned ? '✅ GOOD SPACING' : '❌ TOO CLOSE/FAR'
+            },
+            
+            // Container properties
+            containerInfo: {
+                position: container.style.position,
+                left: container.style.left,
+                top: container.style.top,
+                transform: container.style.transform,
+                zIndex: container.style.zIndex
+            },
+            
+            // Overall assessment
+            overallStatus: (isWellCentered && isWellPositioned) ? 
+                '✅ POSITIONING IS PERFECT' : '⚠️ NEEDS ADJUSTMENT',
+                
+            // Recommendations
+            recommendations: [
+                !isWellCentered ? '• Run fixButtonNow() to correct horizontal alignment' : null,
+                !isWellPositioned ? '• Check vertical spacing (should be 40-60px above textbox)' : null,
+                'Test with: testResizeBehavior() to verify resize stability'
+            ].filter(Boolean)
+        });
+        
+        return {
+            centered: isWellCentered,
+            positioned: isWellPositioned,
+            overall: isWellCentered && isWellPositioned
+        };
+    };
+    
+    // Complete test suite for button positioning
+    window.runAllPositioningTests = function() {
+        console.log('🧪 RUNNING COMPLETE POSITIONING TEST SUITE...');
+        console.log('================================================');
+        
+        // Test 1: Current positioning
+        console.log('1️⃣ CHECKING CURRENT POSITION:');
+        const currentCheck = window.checkButtonPositioning();
+        
+        // Test 2: Textbox center positioning
+        console.log('\n2️⃣ TESTING TEXTBOX CENTER LOGIC:');
+        window.testTextboxCenterPositioning();
+        
+        // Test 3: Resize behavior
+        setTimeout(() => {
+            console.log('\n3️⃣ TESTING RESIZE BEHAVIOR:');
+            window.testResizeBehavior();
+            
+            // Test 4: Final verification
+            setTimeout(() => {
+                console.log('\n4️⃣ FINAL VERIFICATION:');
+                const finalCheck = window.checkButtonPositioning();
+                
+                console.log('\n🎯 TEST SUITE SUMMARY:');
+                console.log('================================================');
+                console.log('Current Position:', currentCheck.overall ? '✅ GOOD' : '❌ NEEDS FIX');
+                console.log('Resize Stability: Check console above for resize test results');
+                console.log('Recommendation:', finalCheck.overall ? 
+                    '✅ Button positioning is working perfectly!' : 
+                    '⚠️ Run fixButtonNow() to correct positioning');
+                console.log('================================================');
+            }, 500);
+        }, 300);
+    };
+    
+    // Test textbox center positioning (for verification)
+    window.testTextboxCenterPositioning = function() {
+        console.log('🧪 TESTING TEXTBOX CENTER POSITIONING...');
+        
+        // Clear any scroll state and force repositioning
+        window.scrollInProgress = false;
+        
+        // Trigger default positioning
+        positionScrollButton();
+        
+        // Verify result
+        setTimeout(() => {
+            const terminalInput = document.getElementById('terminal-input');
+            const button = document.getElementById('smart-scroll-btn');
+            
+            if (terminalInput && button) {
+                const inputRect = terminalInput.getBoundingClientRect();
+                const buttonRect = button.getBoundingClientRect();
+                
+                const textboxCenter = inputRect.left + (inputRect.width / 2);
+                const buttonCenter = buttonRect.left + (buttonRect.width / 2);
+                const difference = Math.abs(textboxCenter - buttonCenter);
+                
+                console.log('🎯 TEXTBOX CENTER POSITIONING TEST:', {
+                    textboxCenter: textboxCenter,
+                    buttonCenter: buttonCenter,
+                    difference: difference.toFixed(2) + 'px',
+                    isCentered: difference < 2 ? '✅ PERFECTLY CENTERED!' : '❌ Needs adjustment',
+                    deviceType: window.innerWidth < 768 ? '📱 Mobile' : '💻 Desktop',
+                    textboxWidth: inputRect.width,
+                    viewportWidth: window.innerWidth,
+                    positionAboveTextbox: (inputRect.top - buttonRect.bottom).toFixed(0) + 'px gap'
+                });
+            }
+        }, 200);
+    };
+    
+    // Test resize behavior
+    window.testResizeBehavior = function() {
+        console.log('🔄 TESTING RESIZE BEHAVIOR...');
+        
+        // Get initial position
+        const terminalInput = document.getElementById('terminal-input');
+        const button = document.getElementById('smart-scroll-btn');
+        
+        if (!terminalInput || !button) {
+            console.error('❌ Required elements not found');
+            return;
+        }
+        
+        const initialInputRect = terminalInput.getBoundingClientRect();
+        const initialButtonRect = button.getBoundingClientRect();
+        const initialInputCenter = initialInputRect.left + (initialInputRect.width / 2);
+        const initialButtonCenter = initialButtonRect.left + (initialButtonRect.width / 2);
+        
+        console.log('📐 INITIAL POSITION:', {
+            textboxCenter: initialInputCenter,
+            buttonCenter: initialButtonCenter,
+            difference: Math.abs(initialInputCenter - initialButtonCenter).toFixed(2) + 'px'
+        });
+        
+        // Simulate resize event
+        console.log('🔄 Simulating resize event...');
+        window.dispatchEvent(new Event('resize'));
+        
+        // Check position after resize handling
+        setTimeout(() => {
+            const newInputRect = terminalInput.getBoundingClientRect();
+            const newButtonRect = button.getBoundingClientRect();
+            const newInputCenter = newInputRect.left + (newInputRect.width / 2);
+            const newButtonCenter = newButtonRect.left + (newButtonRect.width / 2);
+            const finalDifference = Math.abs(newInputCenter - newButtonCenter);
+            
+            console.log('✅ POST-RESIZE POSITION:', {
+                textboxCenter: newInputCenter,
+                buttonCenter: newButtonCenter,
+                difference: finalDifference.toFixed(2) + 'px',
+                resizeBehaviorWorking: finalDifference < 2 ? '✅ YES' : '❌ NO - Button shifted',
+                recommendation: finalDifference >= 2 ? 'Run fixButtonNow() to correct' : 'Positioning is stable'
+            });
+        }, 300);
+    };
+    
+    window.getScrollButtonInfo = function() {
+        const terminalContainer = document.getElementById('terminal-container');
+        const terminalRect = terminalContainer ? terminalContainer.getBoundingClientRect() : null;
+        
+        console.log('Scroll button positioning info:', {
+            terminalContainer: !!terminalContainer,
+            terminalVisible: terminalContainer && !terminalContainer.classList.contains('hidden'),
+            terminalRect: terminalRect,
+            viewport: {
+                width: window.innerWidth,
+                height: window.innerHeight
+            },
+            buttonContainer: {
+                bottom: scrollButtonContainer.style.bottom,
+                left: scrollButtonContainer.style.left,
+                centered: 'precisely centered on top edge of textbox',
+                visible: !scrollButton.classList.contains('hidden')
+            }
+        });
+        
+        return {
+            terminalRect,
+            buttonVisible: !scrollButton.classList.contains('hidden'),
+            buttonPosition: {
+                bottom: scrollButtonContainer.style.bottom,
+                left: scrollButtonContainer.style.left,
+                centered: 'horizontally centered relative to terminal container'
+            }
+        };
     };
     
     // Initial check with delay to ensure content is rendered
-    setTimeout(checkScrollPosition, 200);
+    setTimeout(() => {
+        positionScrollButton();
+        checkScrollPosition();
+    }, 200);
+    
+                // Final setup of direct positioning system
+    setTimeout(() => {
+        console.log('✅ TEXTBOX-TOP POSITIONING SYSTEM ACTIVE');
+        console.log('🎯 Button positioned at top edge of chat textbox');
+        console.log('');
+        console.log('🧪 TEST: Resize your browser window now');
+        console.log('');
+        console.log('🛠️  Command: fixButtonPosition() - Apply positioning manually');
+    }, 1000);
+    
+    // Periodic check to ensure button is correctly shown/hidden
+    setInterval(() => {
+        const currentTerminalMessages = document.getElementById('terminal-messages');
+        const currentScrollButton = document.getElementById('smart-scroll-btn');
+        
+        if (!currentTerminalMessages || !currentScrollButton) return;
+        
+        const scrollHeight = currentTerminalMessages.scrollHeight;
+        const clientHeight = currentTerminalMessages.clientHeight;
+        const needsScrolling = scrollHeight > clientHeight + 20;
+        
+        if (!needsScrolling && !currentScrollButton.classList.contains('hidden')) {
+            // Content doesn't need scrolling but button is showing - hide it
+            currentScrollButton.classList.add('hidden');
+            currentScrollButton.style.display = 'none';
+        } else if (needsScrolling && currentScrollButton.classList.contains('hidden')) {
+            // Content needs scrolling but button is hidden - run check to potentially show it
+            checkScrollPosition();
+        }
+    }, 2000); // Check every 2 seconds
 }
 
 // Smooth scroll to bottom function
