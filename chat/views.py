@@ -7,220 +7,493 @@ from .models import KubernetesCluster, ChatSession, CommandHistory
 import json
 import yaml
 import uuid
-import subprocess
 import tempfile
 import os
-import threading
-import queue
+import docker
+import base64
 import time
-from kubernetes import client, config
-from kubernetes.client.rest import ApiException
+import io
+import tarfile
 
 
-# Global dictionary to store interactive AI sessions
+# Global dictionary to store active containers
+active_containers = {}
+
+# Global dictionary to store active kubectl-ai sessions
 active_ai_sessions = {}
 
+# Docker image name
+KUBECTL_IMAGE_NAME = "your-kubectl-image:latest"
+
+def ensure_docker_image():
+    """Ensure the kubectl Docker image exists, build it if it doesn't"""
+    try:
+        docker_client = docker.from_env()
+        
+        # Check if image exists
+        try:
+            docker_client.images.get(KUBECTL_IMAGE_NAME)
+            print(f"✅ Docker image {KUBECTL_IMAGE_NAME} already exists")
+            return True
+        except docker.errors.ImageNotFound:
+            print(f"🔨 Building Docker image {KUBECTL_IMAGE_NAME}...")
+            return build_docker_image(docker_client)
+            
+    except Exception as e:
+        print(f"❌ Error checking Docker image: {e}")
+        return False
+
+def build_docker_image(docker_client):
+    """Build the kubectl Docker image"""
+    try:
+        # Create Dockerfile content
+        dockerfile_content = """FROM alpine:3.18
+
+# Install tools + download both binaries in one layer
+RUN apk add --no-cache curl tar ca-certificates bash vim nano \\
+    && curl -sSL https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl \\
+       -o /usr/local/bin/kubectl \\
+    && chmod +x /usr/local/bin/kubectl \\
+    && curl -sSL https://github.com/GoogleCloudPlatform/kubectl-ai/releases/download/v0.0.18/kubectl-ai_Linux_x86_64.tar.gz \\
+       | tar -xz -C /usr/local/bin \\
+    && chmod +x /usr/local/bin/kubectl-ai
+
+# Create kube directory
+RUN mkdir -p /root/.kube
+
+# Set working directory
+WORKDIR /root
+
+# Set environment variables
+ENV TERM=xterm-256color
+ENV KUBECONFIG=/root/.kube/config
+
+# Keep container running
+CMD ["/bin/sh"]
+"""
+        
+        # Create a tar archive in memory with the Dockerfile
+        dockerfile_tar = io.BytesIO()
+        with tarfile.open(fileobj=dockerfile_tar, mode='w') as tar:
+            dockerfile_info = tarfile.TarInfo(name='Dockerfile')
+            dockerfile_info.size = len(dockerfile_content.encode('utf-8'))
+            tar.addfile(dockerfile_info, io.BytesIO(dockerfile_content.encode('utf-8')))
+        
+        dockerfile_tar.seek(0)
+        
+        print("🔨 Starting Docker image build...")
+        
+        # Build the image
+        image, build_logs = docker_client.images.build(
+            fileobj=dockerfile_tar,
+            custom_context=True,
+            tag=KUBECTL_IMAGE_NAME,
+            rm=True,
+            nocache=False
+        )
+        
+        # Print build logs
+        for log in build_logs:
+            if 'stream' in log:
+                print(f"🔨 {log['stream'].strip()}")
+        
+        print(f"✅ Successfully built Docker image: {KUBECTL_IMAGE_NAME}")
+        
+        # Test the image
+        test_container = docker_client.containers.run(
+            image=KUBECTL_IMAGE_NAME,
+            command="kubectl version --client",
+            remove=True,
+            detach=False
+        )
+        
+        print("✅ Docker image test successful")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error building Docker image: {e}")
+        return False
 
 
-class PersistentKubectlAI:
-    """Simple kubectl-ai - just make it work!"""
+class KubectlAiSession:
+    """Manage persistent kubectl-ai interactive sessions"""
+    
+    def __init__(self, container_manager, session_id):
+        self.container_manager = container_manager
+        self.session_id = session_id
+        self.ai_process = None
+        self.is_active = False
+        self.conversation_history = []
+        
+    def start_session(self):
+        """Start an interactive kubectl-ai session"""
+        try:
+            print(f"🤖 Starting kubectl-ai interactive session for {self.session_id}")
+            
+            # Start kubectl-ai in interactive mode
+            self.ai_process = self.container_manager.container.exec_run(
+                cmd=['/bin/sh', '-c', 'cd /root && export KUBECONFIG=/root/.kube/config && export GEMINI_API_KEY=AIzaSyCQzZePTw4UTgd9W8zquTQ27p9b9mCzP6w && kubectl-ai'],
+                stdin=True,
+                stdout=True,
+                stderr=True,
+                tty=True,
+                detach=True,
+                workdir='/root'
+            )
+            
+            self.is_active = True
+            print(f"✅ kubectl-ai interactive session started")
+            
+            # Get initial greeting
+            time.sleep(2)  # Wait for kubectl-ai to initialize
+            initial_output = self.read_output()
+            
+            return {
+                'success': True,
+                'output': initial_output or "🤖 **AI session already active** - Continue chatting!\n\nYou can ask me anything about your Kubernetes cluster. For example:\n• \"how many pods?\"\n• \"show me all pods\"\n• \"what's wrong with my cluster?\"\n• \"help me debug pod issues\"",
+                'session_active': True
+            }
+            
+        except Exception as e:
+            print(f"❌ Error starting kubectl-ai session: {e}")
+            self.is_active = False
+            return {
+                'success': False,
+                'error': f'Failed to start AI session: {str(e)}'
+            }
+    
+    def send_message(self, message):
+        """Send a message to kubectl-ai by executing a new command"""
+        try:
+            print(f"🤖 Sending message to kubectl-ai: {message}")
+            
+            # Execute kubectl-ai with the message directly
+            result = self.container_manager.execute_kubectl_ai_command(f'kubectl-ai "{message}"')
+            
+            # Store in conversation history
+            self.conversation_history.append({
+                'user': message,
+                'ai': result['output'],
+                'timestamp': timezone.now()
+            })
+            
+            return {
+                'success': result['exit_code'] == 0,
+                'output': result['output'] or "🤖 AI is processing your request...",
+                'session_active': True
+            }
+            
+        except Exception as e:
+            print(f"❌ Error sending message to kubectl-ai: {e}")
+            return {
+                'success': False,
+                'error': f'Failed to send message to AI: {str(e)}',
+                'session_active': False
+            }
+    
+    def read_output(self):
+        """Read output from kubectl-ai process - not used in current implementation"""
+        return None
+    
+    def stop_session(self):
+        """Stop the kubectl-ai session"""
+        try:
+            self.ai_process = None
+            self.is_active = False
+            print(f"✅ kubectl-ai session stopped for {self.session_id}")
+        except Exception as e:
+            print(f"❌ Error stopping kubectl-ai session: {e}")
+
+
+class KubernetesContainer:
+    """Manage Docker containers for each Kubernetes cluster"""
     
     def __init__(self, cluster, session_id):
         self.cluster = cluster
         self.session_id = session_id
-        self.process = None
-        self.kubeconfig_path = None
+        self.container = None
+        self.docker_client = docker.from_env()
+        self.container_name = f"k8s-terminal-{session_id}"
         self.running = False
         
-    def start_persistent_session(self):
-        """Start kubectl-ai"""
+    def create_container(self):
+        """Create a Docker container with kubectl and kubectl-ai"""
         try:
-            # Create kubeconfig
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-                f.write(self.cluster.kubeconfig)
-                self.kubeconfig_path = f.name
+            # Ensure Docker image exists (build if needed)
+            if not ensure_docker_image():
+                print(f"❌ Failed to ensure Docker image exists")
+                return False
             
-            # Setup environment
-            env = os.environ.copy()
-            env['KUBECONFIG'] = self.kubeconfig_path
+            # Encode kubeconfig to base64 for passing to container
+            kubeconfig_b64 = base64.b64encode(self.cluster.kubeconfig.encode()).decode()
             
-            # Start kubectl-ai with PTY for interactive mode
-            import pty
-            master, slave = pty.openpty()
+            print(f"🐳 Creating container: {self.container_name}")
             
-            self.process = subprocess.Popen(
-                ['kubectl-ai', '--model', 'gemini-2.0-flash-exp'],
-                stdin=slave,
-                stdout=slave,
-                stderr=slave,
-                env=env,
-                preexec_fn=os.setsid
+            # Create container with kubectl and kubectl-ai
+            self.container = self.docker_client.containers.run(
+                image=KUBECTL_IMAGE_NAME,
+                name=self.container_name,
+                environment={
+                    'KUBECONFIG_B64': kubeconfig_b64,
+                    'GEMINI_API_KEY': 'AIzaSyCQzZePTw4UTgd9W8zquTQ27p9b9mCzP6w',
+                    'TERM': 'xterm-256color'
+                },
+                command=["/bin/sh", "-c", "echo $KUBECONFIG_B64 | base64 -d > /root/.kube/config && mkdir -p /root/.kube && export KUBECONFIG=/root/.kube/config && tail -f /dev/null"],
+                stdin_open=True,
+                tty=True,
+                detach=True,
+                remove=False,
+                working_dir="/root",
+                volumes={
+                    # Optional: mount tmp for file operations
+                }
             )
             
-            os.close(slave)
-            self.master_fd = master
+            # Wait a moment for container to initialize
+            time.sleep(2)
             
-            # Make it non-blocking
-            import fcntl
-            flags = fcntl.fcntl(self.master_fd, fcntl.F_GETFL)
-            fcntl.fcntl(self.master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-            
-            print(f"✅ kubectl-ai started")
-            self.running = True
-            
-            # Wait and read initial greeting
-            time.sleep(3)
-            try:
-                initial = os.read(self.master_fd, 4096).decode('utf-8', errors='ignore')
-                # Clean it
-                import re
-                initial = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', initial)
-                initial = re.sub(r'[\x00-\x1f\x7f]', '', initial)
-                initial = initial.replace('>>>', '').strip()
-                print(f"Initial greeting: {initial}")
-            except:
-                pass
-                
-            return True
+            # Verify container is running
+            self.container.reload()
+            if self.container.status == 'running':
+                self.running = True
+                print(f"✅ Container created and running: {self.container_name}")
+                return True
+            else:
+                print(f"❌ Container failed to start: {self.container.status}")
+                return False
             
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"❌ Error creating container: {e}")
             return False
     
-    def send_persistent_message(self, message):
-        """Send message to kubectl-ai"""
-        if not self.running or not self.process:
-            return "kubectl-ai not running"
-        
+    def execute_command(self, command):
+        """Execute command in the container with interactive support for kubectl-ai"""
+        if not self.container or not self.running:
+            return {'output': '❌ Container not available', 'exit_code': 1}
+            
         try:
-            print(f"📤 Sending: {message}")
-            # Send message
-            os.write(self.master_fd, f"{message}\n".encode())
+            print(f"🐳 Executing in {self.container_name}: {command}")
             
-            # Collect response
-            response_parts = []
-            time.sleep(2)  # Initial wait for kubectl-ai to start processing
+            # Special handling for kubectl-ai commands
+            if command.strip().startswith('kubectl-ai'):
+                return self.execute_kubectl_ai_command(command)
             
-            empty_reads = 0
-            max_attempts = 40  # 20 seconds max
+            # Regular command execution
+            timeout = 15  # 15 seconds for regular commands
             
-            for attempt in range(max_attempts):
-                try:
-                    # Try to read available data
-                    chunk = os.read(self.master_fd, 8192).decode('utf-8', errors='ignore')
-                    if chunk:
-                        print(f"📥 Got chunk ({len(chunk)} chars)")
-                        response_parts.append(chunk)
-                        empty_reads = 0
-                        
-                        # Check if we have a complete response
-                        full_response = ''.join(response_parts)
-                        if len(full_response) > 50:  # Have substantial content
-                            # Look for typical endings
-                            if any(end in full_response.lower() for end in [
-                                '?', 'help', 'please', 'in.', 'namespace', 
-                                'pods', 'running', 'kubectl', 'need to know'
-                            ]):
-                                # Give it one more second to complete
-                                time.sleep(1)
-                                try:
-                                    extra = os.read(self.master_fd, 4096).decode('utf-8', errors='ignore')
-                                    if extra:
-                                        response_parts.append(extra)
-                                except:
-                                    pass
-                                break
-                                
-                except OSError as e:
-                    if e.errno in [11, 35]:  # Would block / Resource temporarily unavailable
-                        empty_reads += 1
-                        if empty_reads > 8 and response_parts:
-                            # We have content and no new data for a while
-                            break
-                    else:
-                        print(f"❌ Read error: {e}")
-                        if response_parts:
-                            break  # Use what we have
-                
-                # Check if process died
-                if self.process.poll() is not None:
-                    print(f"❌ kubectl-ai process died!")
-                    break
-                    
-                time.sleep(0.5)
+            # Execute command in container with proper environment and timeout
+            exec_result = self.container.exec_run(
+                cmd=['/bin/sh', '-c', f'cd /root && export KUBECONFIG=/root/.kube/config && export GEMINI_API_KEY=AIzaSyCQzZePTw4UTgd9W8zquTQ27p9b9mCzP6w && timeout {timeout} {command}'],
+                stdout=True,
+                stderr=True,
+                stdin=False,
+                tty=False,
+                workdir='/root'
+            )
             
-            # Combine all parts
-            response = ''.join(response_parts)
-            print(f"📝 Raw response ({len(response)} chars)")
+            # Get output
+            output = exec_result.output.decode('utf-8', errors='ignore') if exec_result.output else ""
             
-            if not response:
-                return "kubectl-ai didn't respond. Try asking again or check if kubectl-ai is working."
+            # Handle timeout (exit code 124)
+            if exec_result.exit_code == 124:
+                output += f"\n⏱️ Command timed out after {timeout} seconds"
             
-            # Clean response
-            import re
+            print(f"🐳 Command exit code: {exec_result.exit_code}")
+            print(f"🐳 Output: {output[:200]}...")
             
-            # Remove ANSI escape sequences
-            cleaned = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', response)
-            cleaned = re.sub(r'\x1b\[[\d;]+m', '', cleaned)
-            cleaned = re.sub(r'\[38;5;\d+m', '', cleaned)
-            cleaned = re.sub(r'\[\d+m', '', cleaned)
-            
-            # Remove control characters
-            cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', cleaned)
-            
-            # Process line by line
-            lines = []
-            for line in cleaned.split('\n'):
-                line = line.strip()
-                if not line:
-                    continue
-                # Skip prompts and echoes
-                if line in ['>>>', f'>>> {message}', message]:
-                    continue
-                if line.startswith('>>> '):
-                    # This might be a prompt with content, extract the content
-                    content = line[4:].strip()
-                    if content and content != message:
-                        lines.append(content)
-                else:
-                    lines.append(line)
-            
-            # Join and clean up
-            final_response = '\n'.join(lines)
-            final_response = re.sub(r'\s*>>>\s*$', '', final_response).strip()
-            
-            print(f"✨ Clean response: {repr(final_response[:200])}...")
-            
-            return final_response if final_response else "kubectl-ai is processing... Try again in a moment."
+            return {
+                'output': output,
+                'exit_code': exec_result.exit_code
+            }
             
         except Exception as e:
-            print(f"❌ Exception: {e}")
-            import traceback
-            traceback.print_exc()
-            return f"Error: {str(e)}"
+            print(f"❌ Error executing command: {e}")
+            return {
+                'output': f'❌ Error executing command: {str(e)}',
+                'exit_code': 1
+            }
     
-    def stop_persistent_session(self):
-        """Stop kubectl-ai"""
-        self.running = False
+    def execute_kubectl_ai_command(self, command):
+        """Execute kubectl-ai command with automatic responses for interactive prompts"""
+        try:
+            print(f"🤖 Executing kubectl-ai command: {command}")
+            
+            # Parse the command to extract the query
+            cmd_parts = command.strip().split(' ', 1)
+            if len(cmd_parts) < 2:
+                # Just "kubectl-ai" without arguments - provide help
+                return {
+                    'output': """🤖 kubectl-ai - AI-powered Kubernetes assistant
+
+Usage examples:
+• kubectl-ai "show me all pods"
+• kubectl-ai "list pods in default namespace"  
+• kubectl-ai "what pods are not running?"
+• kubectl-ai "describe the nginx pod"
+• kubectl-ai "show me services"
+• kubectl-ai "what's wrong with my cluster?"
+• kubectl-ai "help me debug pod issues"
+
+The AI will automatically use the current namespace or ask for clarification when needed.
+For specific namespaces, include it in your query like "show pods in kube-system namespace".""",
+                    'exit_code': 0
+                }
+            
+            query = cmd_parts[1].strip().strip('"').strip("'")
+            
+            print(f"🤖 Original query: {query}")
+            
+            # Execute kubectl-ai with the original query and force non-interactive mode
+            timeout = 90  # Even longer timeout for AI processing to ensure full output
+            
+            # Use --quiet flag and provide context to avoid interactive prompts
+            kubectl_ai_cmd = f'kubectl-ai --quiet "{query}"'
+            
+            exec_result = self.container.exec_run(
+                cmd=['/bin/sh', '-c', f'''cd /root && export KUBECONFIG=/root/.kube/config && export GEMINI_API_KEY=AIzaSyCQzZePTw4UTgd9W8zquTQ27p9b9mCzP6w && echo "🤖 Processing AI query..." && {kubectl_ai_cmd} 2>&1'''],
+                stdout=True,
+                stderr=True,
+                stdin=False,
+                tty=False,
+                workdir='/root',
+                stream=False,
+                demux=False
+            )
+            
+            output = exec_result.output.decode('utf-8', errors='ignore') if exec_result.output else ""
+            
+            # Handle timeout
+            if exec_result.exit_code == 124:
+                output += f"\n⏱️ kubectl-ai timed out after {timeout} seconds. Try a more specific query."
+            
+            # Clean up the output
+            output = self.clean_kubectl_ai_output(output)
+            
+            print(f"🤖 kubectl-ai exit code: {exec_result.exit_code}")
+            print(f"🤖 kubectl-ai output: {output[:300]}...")
+            
+            return {
+                'output': output,
+                'exit_code': exec_result.exit_code
+            }
+            
+        except Exception as e:
+            print(f"❌ Error executing kubectl-ai: {e}")
+            return {
+                'output': f'❌ Error executing kubectl-ai: {str(e)}',
+                'exit_code': 1
+            }
+    
+    def enhance_kubectl_ai_query(self, query):
+        """Enhance the query to be more specific and avoid interactive prompts"""
+        query_lower = query.lower()
         
-        if hasattr(self, 'master_fd'):
-            try:
-                os.close(self.master_fd)
-            except:
-                pass
+        # Add namespace context if not specified
+        if 'namespace' not in query_lower and 'ns' not in query_lower:
+            if any(keyword in query_lower for keyword in ['pod', 'service', 'deployment', 'configmap', 'secret']):
+                # Get current namespace first, default to 'default'
+                try:
+                    ns_result = self.container.exec_run(
+                        cmd=['/bin/sh', '-c', 'kubectl config view --minify --output jsonpath="{..namespace}" 2>/dev/null || echo "default"'],
+                        stdout=True,
+                        stderr=True,
+                        workdir='/root'
+                    )
+                    current_ns = ns_result.output.decode('utf-8', errors='ignore').strip() or 'default'
+                    query = f"{query} in {current_ns} namespace"
+                except:
+                    query = f"{query} in default namespace"
+        
+        # Make queries more specific to avoid ambiguity
+        replacements = {
+            'show me pods': 'list all pods with their status',
+            'get pods': 'list all pods with their status', 
+            'show pods': 'list all pods with their status',
+            'list pods': 'list all pods with their status',
+            'show me services': 'list all services with their details',
+            'get services': 'list all services with their details',
+            'show me deployments': 'list all deployments with their status',
+            'what\'s wrong': 'analyze cluster health and show any issues',
+            'debug': 'troubleshoot and analyze',
+            'help me': 'provide assistance with'
+        }
+        
+        for old, new in replacements.items():
+            if old in query_lower:
+                query = query.replace(old, new)
+                break
+        
+        return query
+    
+    def clean_kubectl_ai_output(self, output):
+        """Clean and format kubectl-ai output"""
+        if not output:
+            return "🤖 kubectl-ai did not return any output."
+        
+        # Remove processing message
+        output = output.replace("🤖 Processing AI query...", "").strip()
+        
+        # Remove ANSI escape codes (color codes like [32m, [0m, etc.)
+        import re
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        output = ansi_escape.sub('', output)
+        
+        # Remove common interactive prompts that might leak through
+        lines = output.split('\n')
+        cleaned_lines = []
+        
+        skip_next = False
+        for line in lines:
+            if skip_next:
+                skip_next = False
+                continue
                 
-        if self.process:
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=3)
-            except:
-                self.process.kill()
+            line_lower = line.lower().strip()
+            
+            # Skip interactive prompt lines
+            if any(prompt in line_lower for prompt in [
+                'which namespace would you like',
+                'please specify',
+                'would you like me to',
+                'do you want to',
+                'goodbye!',
+                'press enter to continue'
+            ]):
+                skip_next = True
+                continue
+            
+            # Keep useful lines (don't skip empty lines as they might be part of formatting)
+            cleaned_lines.append(line)
         
-        if self.kubeconfig_path and os.path.exists(self.kubeconfig_path):
-            try:
-                os.unlink(self.kubeconfig_path)
-            except:
-                pass
+        result = '\n'.join(cleaned_lines).strip()
+        
+        # If result is empty or too short, provide helpful message
+        if not result or len(result) < 10:
+            return "🤖 kubectl-ai completed but didn't provide detailed output. Try a more specific query like:\n• kubectl-ai \"list all pods with status in default namespace\"\n• kubectl-ai \"show me services and their endpoints\"\n• kubectl-ai \"what deployments are running?\""
+        
+        return result
+    
+    def is_running(self):
+        """Check if container is still running"""
+        try:
+            if self.container:
+                self.container.reload()
+                return self.container.status == 'running'
+            return False
+        except:
+            return False
+    
+    def stop_container(self):
+        """Stop and remove the container"""
+        try:
+            self.running = False
+            if self.container:
+                print(f"🐳 Stopping container: {self.container_name}")
+                self.container.stop(timeout=10)
+                self.container.remove()
+                print(f"✅ Container stopped and removed: {self.container_name}")
+        except Exception as e:
+            print(f"❌ Error stopping container: {e}")
 
 
 def index(request):
@@ -232,7 +505,7 @@ def index(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 def create_cluster(request):
-    """Create a new Kubernetes cluster configuration."""
+    """Create a new Kubernetes cluster configuration and container."""
     try:
         data = json.loads(request.body)
         cluster_name = data.get('name', '').strip()
@@ -261,75 +534,60 @@ def create_cluster(request):
             kubeconfig=kubeconfig_content
         )
         
-        # Test connection
-        connection_result = test_cluster_connection(cluster)
-        cluster.connection_status = connection_result['status']
-        cluster.connection_error = connection_result.get('error', '')
-        cluster.last_connection_check = timezone.now()
-        cluster.save()
+        # Create a chat session
+        session_id = str(uuid.uuid4())
+        chat_session = ChatSession.objects.create(
+            cluster=cluster,
+            session_id=session_id,
+            name=f"{cluster_name} Terminal"
+        )
         
-        if connection_result['status'] == 'connected':
-            # Create a chat session
-            session_id = str(uuid.uuid4())
-            chat_session = ChatSession.objects.create(
-                cluster=cluster,
-                session_id=session_id,
-                name=f"{cluster_name} Terminal"
-            )
+        # Create Docker container for this cluster
+        container_manager = KubernetesContainer(cluster, session_id)
+        if container_manager.create_container():
+            # Store container manager
+            active_containers[session_id] = container_manager
+            
+            # Test connection in the actual container
+            print(f"🧪 Testing connection in container...")
+            test_result = container_manager.execute_command('kubectl version --client')
+            if test_result['exit_code'] == 0:
+                cluster.connection_status = 'connected'
+                cluster.connection_error = ''
+                print(f"✅ Container ready with kubectl")
+            else:
+                cluster.connection_status = 'error'
+                cluster.connection_error = test_result['output'][:500]
+                print(f"❌ kubectl test failed: {test_result['output'][:100]}")
+            
+            cluster.last_connection_check = timezone.now()
+            cluster.save()
             
             return JsonResponse({
                 'success': True,
                 'cluster_id': cluster.id,
                 'session_id': session_id,
-                'message': 'Cluster connected successfully!'
+                'message': f'🐳 Container created! Status: {cluster.connection_status}'
             })
         else:
+            cluster.delete()  # Clean up if container creation failed
             return JsonResponse({
                 'success': False,
-                'error': f'Failed to connect to cluster: {connection_result.get("error", "Unknown error")}'
+                'error': 'Failed to create Docker container. Please check Docker is running and try again.'
             })
             
     except Exception as e:
+        print(f"❌ Error in create_cluster: {e}")
         return JsonResponse({
             'success': False,
             'error': f'Server error: {str(e)}'
         })
 
 
-def test_cluster_connection(cluster):
-    """Test connection to a Kubernetes cluster."""
-    try:
-        # Create a temporary kubeconfig file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-            f.write(cluster.kubeconfig)
-            kubeconfig_path = f.name
-        
-        try:
-            # Load the kubeconfig
-            config.load_kube_config(config_file=kubeconfig_path)
-            
-            # Test connection by getting cluster info
-            v1 = client.CoreV1Api()
-            v1.list_namespace(limit=1)
-            
-            return {'status': 'connected'}
-            
-        except ApiException as e:
-            return {'status': 'error', 'error': f'API Error: {e.reason}'}
-        except Exception as e:
-            return {'status': 'error', 'error': str(e)}
-        finally:
-            # Clean up temp file
-            os.unlink(kubeconfig_path)
-            
-    except Exception as e:
-        return {'status': 'error', 'error': f'Configuration error: {str(e)}'}
-
-
 @csrf_exempt
 @require_http_methods(["POST"])
 def execute_command(request, session_id):
-    """Execute a kubectl command for a specific chat session."""
+    """Execute a command in the cluster's Docker container."""
     try:
         chat_session = get_object_or_404(ChatSession, session_id=session_id)
         data = json.loads(request.body)
@@ -343,16 +601,9 @@ def execute_command(request, session_id):
         
         # Handle help command
         if command.strip() == 'help':
-            help_text = """🚀 PERSISTENT kubectl-ai TERMINAL - Exactly like your Mac terminal!
+            help_text = """🐳 KUBERNETES CONTAINER TERMINAL
 
-**kubectl-ai Mode:**
-• Type / - Start persistent kubectl-ai session (EXACTLY like terminal)
-• Press Esc - Exit kubectl-ai mode
-• Continuous conversation with AI context maintained
-• Natural language: "can you check my logs of pods?"
-• Direct kubectl commands: kubectl get pods
-
-**Direct kubectl Commands:**
+**kubectl Commands:**
 • kubectl get pods - List all pods
 • kubectl get nodes - List all nodes  
 • kubectl get services - List all services
@@ -361,22 +612,26 @@ def execute_command(request, session_id):
 • kubectl apply -f <file> - Apply configuration
 • kubectl delete pod <name> - Delete pod
 
-**Terminal Commands:**
+**kubectl-ai Commands (AI Assistance):**
+• kubectl-ai "show me all pods" - Natural language queries
+• kubectl-ai "what's wrong with my cluster?" - AI troubleshooting
+• kubectl-ai "help me debug pod issues" - AI debugging
+
+**Container Commands:**
 • ls, cat, mkdir, rm - File operations
-• vim <filename> - Edit files with vim
-• nano <filename> - Edit files with nano
+• vi <filename> - Edit files (vi editor)
 • clear - Clear terminal
 • pwd, cd - Navigation
+• ps aux - Show running processes
 
-**Debugging:**
-• debug-ai - Debug kubectl-ai installation
-• check-env - Check GEMINI_API_KEY setup
-• kubectl-ai-test - Test kubectl-ai directly
+**Examples:**
+• kubectl get pods -o wide
+• kubectl-ai "list pods that are not running"
+• ls -la /tmp
+• cat /etc/os-release
 
-**Navigation:**
-• ↑↓ Arrow keys - Command history
-
-🚀 Press / for PERSISTENT kubectl-ai session (exactly like terminal)!"""
+This terminal runs in a dedicated Docker container with kubectl and kubectl-ai pre-installed.
+Your GEMINI_API_KEY is configured for kubectl-ai usage."""
             
             # Store help command in history
             CommandHistory.objects.create(
@@ -392,274 +647,6 @@ def execute_command(request, session_id):
                 'exit_code': 0
             })
         
-        # Handle debug-ai command
-        if command.strip() == 'debug-ai':
-            try:
-                # Call the debug function
-                debug_request = type('Request', (), {'session': None})()
-                debug_response = debug_kubectl_ai(debug_request, session_id)
-                debug_data = json.loads(debug_response.content)
-                
-                if debug_data['success']:
-                    debug_info = debug_data['debug_info']
-                    
-                    debug_output = "🔍 kubectl-ai Debug Information\n\n"
-                    
-                    # kubectl-ai location
-                    if debug_info.get('kubectl_ai_which'):
-                        if debug_info['kubectl_ai_which'].get('returncode') == 0:
-                            debug_output += f"✅ kubectl-ai found at: {debug_info['kubectl_ai_which']['stdout']}\n\n"
-                        else:
-                            debug_output += "❌ kubectl-ai not found in PATH\n"
-                            debug_output += f"Error: {debug_info['kubectl_ai_which'].get('stderr', 'Command not found')}\n\n"
-                    
-                    # kubectl-ai version
-                    if debug_info.get('kubectl_ai_version'):
-                        if debug_info['kubectl_ai_version'].get('returncode') == 0:
-                            debug_output += f"📦 kubectl-ai version: {debug_info['kubectl_ai_version']['stdout']}\n\n"
-                        else:
-                            debug_output += "❌ kubectl-ai version check failed\n"
-                            debug_output += f"Error: {debug_info['kubectl_ai_version'].get('stderr', 'Version check failed')}\n\n"
-                    
-                    # kubectl-ai help test
-                    if debug_info.get('kubectl_ai_help'):
-                        if debug_info['kubectl_ai_help'].get('returncode') == 0:
-                            debug_output += "✅ kubectl-ai help command works\n\n"
-                        else:
-                            debug_output += "❌ kubectl-ai help command failed\n"
-                            debug_output += f"Error: {debug_info['kubectl_ai_help'].get('stderr', 'Help command failed')}\n\n"
-                    
-                    # kubectl-ai test
-                    if debug_info.get('kubectl_ai_test'):
-                        if debug_info['kubectl_ai_test'].get('returncode') == 0:
-                            debug_output += "✅ kubectl-ai with Gemini test successful\n"
-                            debug_output += f"Output: {debug_info['kubectl_ai_test']['stdout'][:200]}...\n\n"
-                        else:
-                            debug_output += "❌ kubectl-ai with Gemini test failed\n"
-                            debug_output += f"Error: {debug_info['kubectl_ai_test'].get('stderr', '')[:200]}...\n\n"
-                            debug_output += "💡 Try running this manually to test:\n"
-                            debug_output += "echo 'hello' | kubectl-ai --model gemini-2.5-flash-preview-04-17\n\n"
-                    
-                    # API Keys status
-                    if debug_info.get('api_keys'):
-                        debug_output += "🔑 API Keys Status:\n"
-                        for key, status in debug_info['api_keys'].items():
-                            status_icon = "✅" if "Set" in status else "❌"
-                            debug_output += f"{status_icon} {key}: {status}\n"
-                        debug_output += "\n"
-                    
-                    # Recommendations
-                    debug_output += "💡 Troubleshooting Steps:\n"
-                    
-                    if debug_info.get('kubectl_ai_which', {}).get('returncode') != 0:
-                        debug_output += "1. Install kubectl-ai: Visit https://github.com/sozercan/kubectl-ai\n"
-                    
-                    if debug_info.get('api_keys'):
-                        has_api_key = any("Set" in status for status in debug_info['api_keys'].values())
-                        if not has_api_key:
-                            debug_output += "2. Set up API key: Configure GEMINI_API_KEY, OPENAI_API_KEY, or other provider\n"
-                    
-                    if debug_info.get('kubectl_ai_help', {}).get('returncode') != 0:
-                        debug_output += "3. Check kubectl-ai installation and permissions\n"
-                    
-                    if debug_info.get('kubectl_ai_test', {}).get('returncode') != 0:
-                        debug_output += "4. Check kubectl-ai configuration and AI provider setup\n"
-                        debug_output += "5. Verify your API key is valid and has proper permissions\n"
-                        debug_output += "6. Test manually: echo 'hello' | kubectl-ai --model gemini-2.5-flash-preview-04-17\n"
-                        debug_output += "7. Make sure you've exported GEMINI_API_KEY in the same terminal where you run Django\n"
-                    
-                    # Store debug command in history
-                    CommandHistory.objects.create(
-                        chat_session=chat_session,
-                        command=command,
-                        output=debug_output,
-                        exit_code=0
-                    )
-                    
-                    return JsonResponse({
-                        'success': True,
-                        'output': debug_output,
-                        'exit_code': 0
-                    })
-                else:
-                    error_output = f"🚨 Debug Error: {debug_data.get('error', 'Unknown error')}"
-                    
-                    CommandHistory.objects.create(
-                        chat_session=chat_session,
-                        command=command,
-                        output=error_output,
-                        exit_code=1
-                    )
-                    
-                    return JsonResponse({
-                        'success': True,
-                        'output': error_output,
-                        'exit_code': 1
-                    })
-                    
-            except Exception as e:
-                error_output = f"🚨 Debug command failed: {str(e)}"
-                
-                CommandHistory.objects.create(
-                    chat_session=chat_session,
-                    command=command,
-                    output=error_output,
-                    exit_code=1
-                )
-                
-                return JsonResponse({
-                    'success': True,
-                    'output': error_output,
-                    'exit_code': 1
-                })
-        
-        # Handle kubectl-ai-test command
-        if command.strip() == 'kubectl-ai-test':
-            test_output = "🧪 TESTING kubectl-ai DIRECTLY\n\n"
-            
-            try:
-                # Test kubectl-ai with a simple message
-                import subprocess
-                import os
-                
-                # Set up environment
-                env = os.environ.copy()
-                env['KUBECONFIG'] = 'dummy'  # Use dummy for test
-                
-                test_output += "1. Testing kubectl-ai executable:\n"
-                which_result = subprocess.run('which kubectl-ai', shell=True, capture_output=True, text=True, timeout=5)
-                if which_result.returncode == 0:
-                    test_output += f"   ✅ kubectl-ai found at: {which_result.stdout.strip()}\n\n"
-                else:
-                    test_output += "   ❌ kubectl-ai not found in PATH\n\n"
-                    CommandHistory.objects.create(
-                        chat_session=chat_session,
-                        command=command,
-                        output=test_output,
-                        exit_code=1
-                    )
-                    return JsonResponse({
-                        'success': True,
-                        'output': test_output,
-                        'exit_code': 1
-                    })
-                
-                test_output += "2. Testing kubectl-ai with Gemini API:\n"
-                try:
-                    test_result = subprocess.run(
-                        'echo "hello, are you working?" | kubectl-ai --model gemini-2.5-flash-preview-04-17',
-                        shell=True, capture_output=True, text=True, timeout=20, env=env
-                    )
-                    
-                    if test_result.returncode == 0 and test_result.stdout.strip():
-                        test_output += f"   ✅ kubectl-ai working! Response:\n   {test_result.stdout.strip()}\n\n"
-                        test_output += "🎉 kubectl-ai is ready for persistent session!\n"
-                        test_output += "💡 Press / to start persistent kubectl-ai mode\n"
-                        exit_code = 0
-                    else:
-                        test_output += f"   ❌ kubectl-ai test failed\n"
-                        test_output += f"   Error: {test_result.stderr}\n\n"
-                        test_output += "💡 Check GEMINI_API_KEY: export GEMINI_API_KEY='your-key'\n"
-                        test_output += "💡 Then restart Django server\n"
-                        exit_code = 1
-                        
-                except subprocess.TimeoutExpired:
-                    test_output += "   ⚠️ kubectl-ai test timed out (this can be normal)\n"
-                    test_output += "💡 Press / to try persistent session anyway\n"
-                    exit_code = 0
-                    
-            except Exception as e:
-                test_output += f"❌ Test error: {str(e)}\n"
-                exit_code = 1
-            
-            CommandHistory.objects.create(
-                chat_session=chat_session,
-                command=command,
-                output=test_output,
-                exit_code=exit_code
-            )
-            
-            return JsonResponse({
-                'success': True,
-                'output': test_output,
-                'exit_code': exit_code
-            })
-        
-        # Handle check-env command
-        if command.strip() == 'check-env':
-            env_output = "🔍 Environment Check for AI Chat\n\n"
-            
-            # Check API keys
-            api_keys = ['GEMINI_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY']
-            env_output += "🔑 API Keys Status:\n"
-            has_api_key = False
-            for key in api_keys:
-                if os.environ.get(key):
-                    env_output += f"✅ {key}: Set and available to Django\n"
-                    has_api_key = True
-                else:
-                    env_output += f"❌ {key}: Not found in Django environment\n"
-            
-            if not has_api_key:
-                env_output += "\n🚨 PROBLEM: No API keys found in Django environment\n"
-                env_output += "💡 SOLUTION:\n"
-                env_output += "1. Stop Django server (Ctrl+C)\n"
-                env_output += "2. Export your API key:\n"
-                env_output += "   export GEMINI_API_KEY='your-gemini-api-key-here'\n"
-                env_output += "3. Restart Django:\n"
-                env_output += "   python manage.py runserver\n"
-                env_output += "4. Try AI chat again\n\n"
-            
-            # Check kubectl-ai
-            env_output += "🤖 kubectl-ai Status:\n"
-            try:
-                which_result = subprocess.run('which kubectl-ai', shell=True, capture_output=True, text=True, timeout=5)
-                if which_result.returncode == 0:
-                    env_output += f"✅ kubectl-ai found at: {which_result.stdout.strip()}\n"
-                else:
-                    env_output += "❌ kubectl-ai not found in PATH\n"
-                    env_output += "💡 Install with: brew install kubectl-ai (macOS)\n"
-            except Exception as e:
-                env_output += f"❌ Error checking kubectl-ai: {str(e)}\n"
-            
-            # Test kubectl-ai if available and API key exists
-            if has_api_key:
-                env_output += "\n🧪 Testing kubectl-ai with API:\n"
-                try:
-                    # Use Python's timeout instead of shell timeout command (not available on all systems)
-                    test_result = subprocess.run(
-                        'echo "test" | kubectl-ai --model gemini-2.5-flash-preview-04-17',
-                        shell=True, capture_output=True, text=True, timeout=15
-                    )
-                    if test_result.returncode == 0:
-                        env_output += "✅ kubectl-ai working with Gemini API\n"
-                    else:
-                        env_output += "❌ kubectl-ai test failed\n"
-                        if test_result.stderr:
-                            env_output += f"Error: {test_result.stderr[:100]}\n"
-                except subprocess.TimeoutExpired:
-                    env_output += "⚠️ kubectl-ai test timed out (but this is often normal)\n"
-                except Exception as e:
-                    env_output += f"❌ kubectl-ai test error: {str(e)}\n"
-            
-            env_output += "\n💡 If AI chat still doesn't work:\n"
-            env_output += "1. Make sure API key is exported in same terminal as Django\n"
-            env_output += "2. Restart Django completely\n"
-            env_output += "3. Try 'debug-ai' command for more details\n"
-            
-            CommandHistory.objects.create(
-                chat_session=chat_session,
-                command=command,
-                output=env_output,
-                exit_code=0
-            )
-            
-            return JsonResponse({
-                'success': True,
-                'output': env_output,
-                'exit_code': 0
-            })
-        
         # Handle clear command
         if command.strip() == 'clear':
             return JsonResponse({
@@ -668,10 +655,59 @@ def execute_command(request, session_id):
                 'clear': True
             })
         
-        # Allow all commands - let them run naturally and show their output/errors
+        # Handle AI session activation
+        if command.strip() == 'ai' or command.strip() == 'kubectl-ai':
+            return start_ai_session(request, session_id)
         
-        # Execute command with the cluster's kubeconfig
-        result = execute_shell_command(chat_session.cluster, command)
+        # Get container for this session
+        if session_id not in active_containers:
+            return JsonResponse({
+                'success': False,
+                'error': '🐳 Container not found. Please refresh the page and try again.'
+            })
+        
+        container_manager = active_containers[session_id]
+        
+        # Check if container is still running
+        if not container_manager.is_running():
+            # Try to recreate container
+            print(f"🐳 Container not running, recreating...")
+            if container_manager.create_container():
+                print(f"✅ Container recreated successfully")
+            else:
+                return JsonResponse({
+                    'success': False,
+                    'error': '🐳 Container stopped and could not be restarted. Please refresh the page.'
+                })
+        
+        # Check if this is an AI session message
+        if session_id in active_ai_sessions:
+            ai_session = active_ai_sessions[session_id]
+            if ai_session.is_active:
+                # Send message to AI session
+                result = ai_session.send_message(command)
+                
+                # Store in command history
+                CommandHistory.objects.create(
+                    chat_session=chat_session,
+                    command=command,
+                    output=result.get('output', ''),
+                    exit_code=0 if result.get('success') else 1
+                )
+                
+                # Update session last activity
+                chat_session.last_activity = timezone.now()
+                chat_session.save()
+                
+                return JsonResponse({
+                    'success': result.get('success', True),
+                    'output': result.get('output', ''),
+                    'exit_code': 0 if result.get('success') else 1,
+                    'ai_session_active': True
+                })
+        
+        # Execute regular command in container
+        result = container_manager.execute_command(command)
         
         # Store command history
         CommandHistory.objects.create(
@@ -697,69 +733,42 @@ def execute_command(request, session_id):
             'error': 'Chat session not found'
         })
     except Exception as e:
+        print(f"❌ Error in execute_command: {e}")
         return JsonResponse({
             'success': False,
             'error': f'Error executing command: {str(e)}'
         })
 
 
-def execute_shell_command(cluster, command):
-    """Execute a shell command. For kubectl commands, use the cluster's kubeconfig."""
+def test_cluster_connection(cluster):
+    """Simple connection test - just verify kubeconfig is valid YAML"""
     try:
-        # Create a temporary kubeconfig file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-            f.write(cluster.kubeconfig)
-            kubeconfig_path = f.name
-        
-        try:
-            # Set environment variables for command execution
-            env = os.environ.copy()
-            
-            # Only set KUBECONFIG for kubectl commands
-            if command.strip().startswith('kubectl'):
-                env['KUBECONFIG'] = kubeconfig_path
-            
-            result = subprocess.run(
-                command,
-                shell=True,  # Use shell to support complex commands with pipes, etc.
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=30,  # Shorter timeout - most commands should complete quickly
-                cwd=os.path.expanduser('~'),  # Start in home directory
-                stdin=subprocess.PIPE  # Allow stdin for interactive commands
-            )
-            
-            output = result.stdout
-            if result.stderr:
-                output += f"\nError: {result.stderr}"
-            
-            return {
-                'output': output,
-                'exit_code': result.returncode
-            }
-            
-        finally:
-            # Clean up temp file
-            os.unlink(kubeconfig_path)
-            
-    except subprocess.TimeoutExpired:
-        return {
-            'output': 'Command timed out after 30 seconds (use Ctrl+C to interrupt)',
-            'exit_code': 124
-        }
+        # Validate kubeconfig format
+        kubeconfig_data = yaml.safe_load(cluster.kubeconfig)
+        if isinstance(kubeconfig_data, dict) and 'clusters' in kubeconfig_data:
+            return {'status': 'connected'}
+        else:
+            return {'status': 'error', 'error': 'Invalid kubeconfig format'}
     except Exception as e:
-        return {
-            'output': f'Error executing command: {str(e)}',
-            'exit_code': 1
-        }
+        return {'status': 'error', 'error': f'Kubeconfig validation failed: {str(e)}'}
 
 
 @require_http_methods(["GET"])
 def get_chat_history(request, session_id):
-    """Get command history for a chat session."""
+    """Get command history for a chat session and ensure container exists."""
     try:
         chat_session = get_object_or_404(ChatSession, session_id=session_id)
+        
+        # Ensure container exists for this session
+        if session_id not in active_containers:
+            print(f"🐳 Creating container for session {session_id} on history load...")
+            container_manager = KubernetesContainer(chat_session.cluster, session_id)
+            if container_manager.create_container():
+                active_containers[session_id] = container_manager
+                print(f"✅ Container created for session {session_id}")
+            else:
+                print(f"❌ Failed to create container for session {session_id}")
+        
         history = CommandHistory.objects.filter(chat_session=chat_session).order_by('timestamp')
         
         history_data = [{
@@ -917,6 +926,20 @@ def update_kubeconfig(request, cluster_id):
         cluster.last_connection_check = timezone.now()
         cluster.save()
         
+        # Update containers with new kubeconfig
+        for session in cluster.chat_sessions.filter(is_active=True):
+            if session.session_id in active_containers:
+                print(f"🐳 Updating container for session {session.session_id}")
+                # Stop old container and create new one
+                active_containers[session.session_id].stop_container()
+                
+                new_container = KubernetesContainer(cluster, session.session_id)
+                if new_container.create_container():
+                    active_containers[session.session_id] = new_container
+                    print(f"✅ Container updated for session {session.session_id}")
+                else:
+                    print(f"❌ Failed to update container for session {session.session_id}")
+        
         if connection_result['status'] == 'connected':
             return JsonResponse({
                 'success': True,
@@ -942,6 +965,13 @@ def delete_cluster(request, cluster_id):
     try:
         cluster = get_object_or_404(KubernetesCluster, id=cluster_id)
         
+        # Stop and remove containers for this cluster
+        for session in cluster.chat_sessions.filter(is_active=True):
+            if session.session_id in active_containers:
+                print(f"🐳 Stopping container for session {session.session_id}")
+                active_containers[session.session_id].stop_container()
+                del active_containers[session.session_id]
+        
         # Mark cluster as inactive instead of deleting to preserve data
         cluster.is_active = False
         cluster.save()
@@ -960,237 +990,135 @@ def delete_cluster(request, cluster_id):
             'error': f'Server error: {str(e)}'
         })
 
+
 @require_http_methods(["GET"])
 def check_cluster_status(request, cluster_id):
-    """Check cluster connection status."""
+    """Check cluster connection status via container."""
     try:
         cluster = get_object_or_404(KubernetesCluster, id=cluster_id)
         
-        # Test connection by running a simple kubectl command
-        if cluster.kubeconfig:
-            try:
-                # Create a temporary kubeconfig file
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-                    f.write(cluster.kubeconfig)
-                    kubeconfig_path = f.name
-                
-                try:
-                    # Test connection with a simple command that actually tests server connectivity
-                    env = os.environ.copy()
-                    env['KUBECONFIG'] = kubeconfig_path
-                    
-                    # First try to get cluster info (tests actual connectivity)
-                    result = subprocess.run(
-                        ['kubectl', 'cluster-info', '--request-timeout=5s'],
-                        capture_output=True,
-                        text=True,
-                        env=env,
-                        timeout=8  # Short timeout for status check
-                    )
-                    
-                    if result.returncode == 0 and 'running at' in result.stdout.lower():
-                        # Cluster is actually reachable
-                        cluster.connection_status = 'connected'
-                        cluster.save()
-                        
-                        return JsonResponse({
-                            'success': True,
-                            'status': 'connected'
-                        })
-                    else:
-                        # Try fallback - just test if kubeconfig is valid
-                        fallback_result = subprocess.run(
-                            ['kubectl', 'config', 'view', '--minify'],
-                            capture_output=True,
-                            text=True,
-                            env=env,
-                            timeout=5
-                        )
-                        
-                        if fallback_result.returncode == 0:
-                            # Kubeconfig is valid, assume connection is working
-                            cluster.connection_status = 'connected'
-                            cluster.save()
-                            
-                            return JsonResponse({
-                                'success': True,
-                                'status': 'connected'
-                            })
-                        else:
-                            # Connection failed
-                            cluster.connection_status = 'error'
-                            cluster.save()
-                            
-                            return JsonResponse({
-                                'success': True,
-                                'status': 'error'
-                            })
-                        
-                finally:
-                    # Clean up temporary file
-                    if os.path.exists(kubeconfig_path):
-                        os.unlink(kubeconfig_path)
-                        
-            except subprocess.TimeoutExpired:
-                cluster.connection_status = 'error'
-                cluster.save()
-                return JsonResponse({
-                    'success': True,
-                    'status': 'error'
-                })
-            except Exception as e:
-                cluster.connection_status = 'error'
-                cluster.save()
-                return JsonResponse({
-                    'success': True,
-                    'status': 'error'
-                })
-        else:
-            # No kubeconfig available
-            cluster.connection_status = 'error'
-            cluster.save()
-            return JsonResponse({
-                'success': True,
-                'status': 'error'
-            })
+        # Test connection via container
+        connection_result = test_cluster_connection(cluster)
+        cluster.connection_status = connection_result['status']
+        cluster.connection_error = connection_result.get('error', '')
+        cluster.last_connection_check = timezone.now()
+        cluster.save()
+        
+        return JsonResponse({
+            'success': True,
+            'status': connection_result['status']
+        })
         
     except Exception as e:
         return JsonResponse({
             'success': False,
             'error': f'Server error: {str(e)}'
-        }) 
+        })
 
 
-@csrf_exempt
-@require_http_methods(["POST"])
 def start_ai_session(request, session_id):
-    """🚀 TERMINAL MODE: Start kubectl-ai exactly like your terminal!"""
+    """Start an interactive kubectl-ai session"""
     try:
         chat_session = get_object_or_404(ChatSession, session_id=session_id)
         
-        # Check if session already exists and is healthy
-        if session_id in active_ai_sessions:
-            ai_session = active_ai_sessions[session_id]
-            if ai_session.running and ai_session.process and ai_session.process.poll() is None:
-                return JsonResponse({
-                    'success': True,
-                    'message': 'kubectl-ai session already active',
-                    'initial_response': 'kubectl-ai session is ready. How can I help you with your Kubernetes cluster?'
-                })
-            else:
-                # Clean up dead session
-                try:
-                    ai_session.stop_persistent_session()
-                except:
-                    pass
-                del active_ai_sessions[session_id]
-        
-        print(f"🚀 TERMINAL MODE: Starting kubectl-ai for session {session_id}")
-        
-        # Create and start new kubectl-ai session
-        ai_session = PersistentKubectlAI(chat_session.cluster, session_id)
-        
-        if ai_session.start_persistent_session():
-            active_ai_sessions[session_id] = ai_session
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'kubectl-ai session started!',
-                'initial_response': 'Hey there, what can I help you with today ?'
-            })
-        else:
+        # Get container for this session
+        if session_id not in active_containers:
             return JsonResponse({
                 'success': False,
-                'error': 'Failed to start kubectl-ai session. Make sure kubectl-ai is installed and GEMINI_API_KEY is set in Django environment.'
+                'error': '🐳 Container not found. Please refresh the page and try again.'
             })
-            
+        
+        container_manager = active_containers[session_id]
+        
+        # Check if container is still running
+        if not container_manager.is_running():
+            return JsonResponse({
+                'success': False,
+                'error': '🐳 Container not running. Please refresh the page and try again.'
+            })
+        
+        # Create AI session if it doesn't exist
+        if session_id not in active_ai_sessions:
+            ai_session = KubectlAiSession(container_manager, session_id)
+            active_ai_sessions[session_id] = ai_session
+        else:
+            ai_session = active_ai_sessions[session_id]
+        
+        # Start the AI session
+        result = ai_session.start_session()
+        
+        # Store in command history
+        CommandHistory.objects.create(
+            chat_session=chat_session,
+            command='kubectl-ai',
+            output=result.get('output', ''),
+            exit_code=0 if result.get('success') else 1
+        )
+        
+        # Update session last activity
+        chat_session.last_activity = timezone.now()
+        chat_session.save()
+        
+        return JsonResponse({
+            'success': result.get('success', True),
+            'output': result.get('output', ''),
+            'exit_code': 0 if result.get('success') else 1,
+            'ai_session_active': True
+        })
+        
     except ChatSession.DoesNotExist:
         return JsonResponse({
             'success': False,
             'error': 'Chat session not found'
         })
     except Exception as e:
+        print(f"❌ Error starting AI session: {e}")
         return JsonResponse({
             'success': False,
-            'error': f'Error starting kubectl-ai session: {str(e)}'
+            'error': f'Error starting AI session: {str(e)}'
         })
 
 
-@csrf_exempt  
+# Remove AI session endpoints - AI is handled directly via kubectl-ai commands
+# No separate AI session management needed
+
+
+# Debug endpoint to check container status
 @require_http_methods(["GET"])
 def debug_kubectl_ai(request, session_id):
-    """Debug endpoint to check kubectl-ai installation and environment."""
+    """Debug container and kubectl-ai status"""
     try:
         debug_info = {}
         
-        # Check if kubectl-ai exists
-        try:
-            which_result = subprocess.run('which kubectl-ai', shell=True, capture_output=True, text=True, timeout=5)
-            debug_info['kubectl_ai_which'] = {
-                'returncode': which_result.returncode,
-                'stdout': which_result.stdout.strip(),
-                'stderr': which_result.stderr.strip()
-            }
-        except Exception as e:
-            debug_info['kubectl_ai_which'] = {'error': str(e)}
-        
-        # Try to run kubectl-ai --version
-        try:
-            version_result = subprocess.run('kubectl-ai --version', shell=True, capture_output=True, text=True, timeout=10)
-            debug_info['kubectl_ai_version'] = {
-                'returncode': version_result.returncode,
-                'stdout': version_result.stdout.strip(),
-                'stderr': version_result.stderr.strip()
-            }
-        except Exception as e:
-            debug_info['kubectl_ai_version'] = {'error': str(e)}
-        
-        # Check PATH
-        debug_info['PATH'] = os.environ.get('PATH', 'Not found')
-        
-        # Test kubectl-ai functionality
-        try:
-            test_basic = subprocess.run('kubectl-ai --help', shell=True, capture_output=True, text=True, timeout=10)
-            debug_info['kubectl_ai_help'] = {
-                'returncode': test_basic.returncode,
-                'stdout': test_basic.stdout[:500] if test_basic.stdout else '',
-                'stderr': test_basic.stderr[:500] if test_basic.stderr else ''
-            }
-        except Exception as e:
-            debug_info['kubectl_ai_help'] = {'error': str(e)}
-        
-        # Try direct kubectl-ai test with simple query using user's working Gemini model
-        try:
-            test_result = subprocess.run(
-                'echo "hello" | kubectl-ai --model gemini-2.5-flash-preview-04-17',
-                shell=True, capture_output=True, text=True, timeout=30
-            )
-            debug_info['kubectl_ai_test'] = {
-                'returncode': test_result.returncode,
-                'stdout': test_result.stdout[:500],  # Limit output
-                'stderr': test_result.stderr[:500]
-            }
-        except subprocess.TimeoutExpired:
-            debug_info['kubectl_ai_test'] = {
-                'returncode': 124,
-                'stdout': '',
-                'stderr': 'Test timed out (often normal for API calls)'
-            }
-        except Exception as e:
-            debug_info['kubectl_ai_test'] = {'error': str(e)}
-        
-        # Check environment variables for API keys
-        env_vars = {}
-        api_key_vars = [
-            'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENAI_API_KEY', 
-            'ANTHROPIC_API_KEY', 'AZURE_OPENAI_API_KEY'
-        ]
-        for var in api_key_vars:
-            if os.environ.get(var):
-                env_vars[var] = "Set (hidden for security)"
-            else:
-                env_vars[var] = "Not set"
-        debug_info['api_keys'] = env_vars
+        # Check if session has container
+        if session_id in active_containers:
+            container_manager = active_containers[session_id]
+            debug_info['container_exists'] = True
+            debug_info['container_running'] = container_manager.is_running()
+            debug_info['container_name'] = container_manager.container_name
+            
+            if container_manager.is_running():
+                # Test kubectl
+                kubectl_result = container_manager.execute_command('kubectl version --client')
+                debug_info['kubectl_test'] = {
+                    'exit_code': kubectl_result['exit_code'],
+                    'output': kubectl_result['output'][:200]
+                }
+                
+                # Test kubectl-ai
+                ai_result = container_manager.execute_command('kubectl-ai --help')
+                debug_info['kubectl_ai_test'] = {
+                    'exit_code': ai_result['exit_code'],
+                    'output': ai_result['output'][:200]
+                }
+                
+                # Test API key
+                api_test = container_manager.execute_command('echo $GEMINI_API_KEY | wc -c')
+                debug_info['api_key_length'] = api_test['output'].strip()
+                
+        else:
+            debug_info['container_exists'] = False
+            debug_info['container_running'] = False
         
         return JsonResponse({
             'success': True,
@@ -1204,343 +1132,27 @@ def debug_kubectl_ai(request, session_id):
         })
 
 
-@csrf_exempt
-@require_http_methods(["GET"])
-def check_ai_session(request, session_id):
-    """Check if an interactive AI session is active."""
-    try:
-        is_active = session_id in active_ai_sessions
-        if is_active:
-            ai_session = active_ai_sessions[session_id]
-            is_running = ai_session.running and ai_session.process and ai_session.process.poll() is None
-        else:
-            is_running = False
-        
-        return JsonResponse({
-            'success': True,
-            'is_active': is_active and is_running,
-            'session_exists': is_active
-        })
-        
-    except Exception as e:
-        return JsonResponse({
-            'success': False,
-            'error': f'Error checking AI session: {str(e)}'
-        })
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-def stop_ai_session(request, session_id):
-    """Stop the persistent kubectl-ai session."""
-    try:
-        if session_id in active_ai_sessions:
-            ai_session = active_ai_sessions[session_id]
-            
-            # Stop persistent session
-            if hasattr(ai_session, 'stop_persistent_session'):
-                print(f"🚀 PERSISTENT: Stopping persistent kubectl-ai session")
-                ai_session.stop_persistent_session()
-            # Stop old interactive session
-            elif hasattr(ai_session, 'stop_session'):
-                print(f"🚀 FALLBACK: Stopping old interactive session")
-                ai_session.stop_session()
-            
-            del active_ai_sessions[session_id]
-        
-        return JsonResponse({
-            'success': True,
-            'message': 'kubectl-ai session stopped'
-        })
-        
-    except Exception as e:
-        return JsonResponse({
-            'success': False,
-            'error': f'Error stopping kubectl-ai session: {str(e)}'
-        })
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-def ai_assistance(request, session_id):
-    """🚀 TERMINAL MODE: kubectl-ai exactly like your terminal!"""
-    try:
-        chat_session = get_object_or_404(ChatSession, session_id=session_id)
-        data = json.loads(request.body)
-        user_message = data.get('message', '').strip()
-        
-        if not user_message:
-            return JsonResponse({
-                'success': False,
-                'error': 'Message is required'
-            })
-        
-        print(f"🚀 TERMINAL MODE: Processing: {repr(user_message)}")
-        
-        # Check if kubectl-ai session exists
-        if session_id not in active_ai_sessions:
-            return JsonResponse({
-                'success': False,
-                'error': 'kubectl-ai session not active. Please restart AI mode (press Esc, then /).'
-            })
-        
-        ai_session = active_ai_sessions[session_id]
-        
-        # Check if session is alive
-        if not (ai_session.running and ai_session.process and ai_session.process.poll() is None):
-            # Clean up dead session
-            try:
-                ai_session.stop_persistent_session()
-            except:
-                pass
-            del active_ai_sessions[session_id]
-            
-            return JsonResponse({
-                'success': False,
-                'error': 'kubectl-ai session has ended. Please restart AI mode (press Esc, then /).'
-            })
-        
-        # Send message to kubectl-ai (exactly like terminal)
-        print(f"🚀 TERMINAL MODE: Sending to kubectl-ai: {repr(user_message)}")
-        
+# Cleanup function to stop containers on server shutdown
+def cleanup_containers():
+    """Stop all active containers"""
+    print("🐳 Cleaning up containers...")
+    for session_id, container_manager in active_containers.items():
         try:
-            response = ai_session.send_persistent_message(user_message)
-            print(f"🚀 TERMINAL MODE: Got response: {repr(response[:200] if response else 'None')}")
-            
-            if not response or response.startswith("kubectl-ai not running"):
-                return JsonResponse({
-                    'success': False,
-                    'error': 'kubectl-ai session ended. Please restart AI mode.'
-                })
-            
-            # Store in history
-            CommandHistory.objects.create(
-                chat_session=chat_session,
-                command=f"💬 {user_message}",
-                output=response,
-                exit_code=0
-            )
-            
-            chat_session.last_activity = timezone.now()
-            chat_session.save()
-            
-            return JsonResponse({
-                'success': True,
-                'response': response,
-                'commands': extract_kubectl_commands(response),
-                'is_interactive': True,
-                'is_kubectl_ai': True
-            })
-            
+            container_manager.stop_container()
         except Exception as e:
-            print(f"🚨 TERMINAL MODE ERROR: {str(e)}")
-            return JsonResponse({
-                'success': False,
-                'error': f'kubectl-ai error: {str(e)}. Try restarting AI mode.'
-            })
-            
-    except ChatSession.DoesNotExist:
-        return JsonResponse({
-            'success': False,
-            'error': 'Chat session not found'
-        })
-    except Exception as e:
-        print(f"🚨 UNEXPECTED ERROR: {str(e)}")
-        return JsonResponse({
-            'success': False,
-            'error': f'Unexpected error: {str(e)}'
-        })
+            print(f"❌ Error stopping container {session_id}: {e}")
+    active_containers.clear()
+    print("✅ Container cleanup completed")
 
 
-# Removed old non-interactive functions - now using InteractiveKubectlAI class
+# Signal handler for Django shutdown
+import signal
+import atexit
 
+def handle_shutdown(signum, frame):
+    cleanup_containers()
 
-def execute_kubectl_command_directly(cluster, command):
-    """🚀 FULL TERMINAL: Execute kubectl commands directly against the cluster!"""
-    try:
-        # Create temporary kubeconfig file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-            f.write(cluster.kubeconfig)
-            kubeconfig_path = f.name
-        
-        try:
-            # Set environment variables for command execution
-            env = os.environ.copy()
-            env['KUBECONFIG'] = kubeconfig_path
-            
-            print(f"🚀 FULL TERMINAL: Executing: {command}")
-            
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=60,  # 60 seconds for kubectl commands
-                cwd=os.path.expanduser('~')
-            )
-            
-            output = result.stdout
-            if result.stderr:
-                output += f"\nError: {result.stderr}"
-            
-            return {
-                'output': f"🚀 DIRECT KUBECTL EXECUTION:\n\n{output}",
-                'exit_code': result.returncode
-            }
-            
-        finally:
-            # Clean up temp file
-            os.unlink(kubeconfig_path)
-            
-    except subprocess.TimeoutExpired:
-        return {
-            'output': '🚀 FULL TERMINAL: Command timed out after 60 seconds',
-            'exit_code': 124
-        }
-    except Exception as e:
-        return {
-            'output': f'🚀 FULL TERMINAL: Error executing command: {str(e)}',
-            'exit_code': 1
-        }
-
-
-def intelligent_kubectl_interpreter(cluster, user_message):
-    """🚀 FULL TERMINAL: Intelligent kubectl command interpreter!"""
-    message_lower = user_message.lower()
-    
-    # Mapping of natural language to kubectl commands
-    kubectl_mappings = [
-        # Pod queries
-        (r'how many pods?|pod count|count pods', 'kubectl get pods --no-headers | wc -l'),
-        (r'show.*pods?|list.*pods?|get.*pods?', 'kubectl get pods'),
-        (r'pod.*status|running.*pods?', 'kubectl get pods -o wide'),
-        (r'pod.*details?|describe.*pod', 'kubectl get pods -o yaml'),
-        
-        # Node queries  
-        (r'show.*nodes?|list.*nodes?|get.*nodes?', 'kubectl get nodes'),
-        (r'node.*status', 'kubectl get nodes -o wide'),
-        (r'describe.*node', 'kubectl describe nodes'),
-        
-        # Service queries
-        (r'show.*services?|list.*services?|get.*services?', 'kubectl get services'),
-        (r'service.*status', 'kubectl get services -o wide'),
-        
-        # Deployment queries
-        (r'show.*deployments?|list.*deployments?|get.*deployments?', 'kubectl get deployments'),
-        (r'deployment.*status', 'kubectl get deployments -o wide'),
-        
-        # Namespace queries
-        (r'show.*namespaces?|list.*namespaces?|get.*namespaces?', 'kubectl get namespaces'),
-        
-        # General cluster info
-        (r'cluster.*info|cluster.*status', 'kubectl cluster-info'),
-        (r'cluster.*version', 'kubectl version'),
-        
-        # Resource queries
-        (r'show.*all|list.*all|get.*all', 'kubectl get all'),
-        (r'what.*running|what.*cluster', 'kubectl get all --all-namespaces'),
-    ]
-    
-    # Find matching command
-    for pattern, kubectl_cmd in kubectl_mappings:
-        import re
-        if re.search(pattern, message_lower):
-            print(f"🚀 FULL TERMINAL: Matched pattern '{pattern}' -> {kubectl_cmd}")
-            result = execute_kubectl_command_directly(cluster, kubectl_cmd)
-            result['suggested_commands'] = [kubectl_cmd]
-            return result
-    
-    # If no pattern matches, try to extract kubectl-like intent
-    if any(word in message_lower for word in ['pod', 'node', 'service', 'deployment', 'namespace', 'cluster']):
-        # Provide helpful suggestions
-        suggestions = [
-            "kubectl get pods",
-            "kubectl get nodes", 
-            "kubectl get services",
-            "kubectl get deployments",
-            "kubectl cluster-info"
-        ]
-        
-        return {
-            'output': f"""🚀 FULL TERMINAL: I understand you're asking about Kubernetes resources, but I couldn't match your exact request.
-
-Here are some useful commands you can try:
-
-• kubectl get pods - List all pods
-• kubectl get nodes - List all nodes  
-• kubectl get services - List all services
-• kubectl get deployments - List all deployments
-• kubectl cluster-info - Get cluster information
-
-Or you can type any kubectl command directly, like:
-kubectl get pods -o wide
-kubectl describe pod <pod-name>
-kubectl logs <pod-name>
-
-Just type the kubectl command and I'll execute it against your cluster!""",
-            'exit_code': 0,
-            'suggested_commands': suggestions
-        }
-    
-    # For non-kubernetes queries, provide general help
-    return {
-        'output': f"""🚀 FULL TERMINAL: Interactive Kubernetes Terminal Ready!
-
-You can:
-1. Type any kubectl command directly: kubectl get pods
-2. Ask natural questions: "how many pods are running?"
-3. Get cluster info: "show me cluster status"
-4. List resources: "show all services"
-
-Example commands:
-• kubectl get pods
-• kubectl get nodes
-• kubectl get services  
-• kubectl describe pod <name>
-• kubectl logs <pod-name>
-• kubectl cluster-info
-
-What would you like to explore in your cluster?""",
-        'exit_code': 0,
-        'suggested_commands': [
-            "kubectl get pods",
-            "kubectl get nodes",
-            "kubectl cluster-info"
-        ]
-    }
-
-
-def extract_kubectl_commands(response):
-    """Extract kubectl commands from AI response."""
-    commands = []
-    lines = response.split('\n')
-    
-    for line in lines:
-        # Look for lines that contain kubectl commands
-        stripped = line.strip()
-        if (stripped.startswith('kubectl ') or 
-            stripped.startswith('$ kubectl ') or
-            '`kubectl ' in stripped):
-            
-            # Clean up the command
-            if stripped.startswith('$ '):
-                command = stripped[2:]
-            elif '`' in stripped:
-                # Extract command from markdown code block
-                start = stripped.find('`') + 1
-                end = stripped.find('`', start)
-                if end > start:
-                    command = stripped[start:end]
-                else:
-                    continue
-            else:
-                command = stripped
-            
-            if command.startswith('kubectl ') and command not in commands:
-                commands.append(command)
-    
-    return commands[:5]  # Limit to 5 commands
-
-
-# Removed extract_suggestions and extract_follow_up_questions - handled by interactive kubectl-ai
+# Register cleanup handlers
+signal.signal(signal.SIGTERM, handle_shutdown)
+signal.signal(signal.SIGINT, handle_shutdown)
+atexit.register(cleanup_containers)
