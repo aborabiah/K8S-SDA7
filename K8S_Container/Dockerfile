@@ -19,5 +19,14 @@ WORKDIR /root
 ENV TERM=xterm-256color
 ENV KUBECONFIG=/root/.kube/config
 
-# Keep container running
+# Set environment variables for kubectl-ai
+ENV GEMINI_API_KEY=AIzaSyAus1bYeszdrau2WHY-OSJnfDSqPCqL47g
+
+# Create kubectl-ai config directory and config file
+RUN mkdir -p /root/.config/kubectl-ai && \
+    echo '# LLM provider configuration' > /root/.config/kubectl-ai/config.yaml && \
+    echo 'llmProvider: "gemini"' >> /root/.config/kubectl-ai/config.yaml && \
+    echo 'model: "gemini-2.5-pro"' >> /root/.config/kubectl-ai/config.yaml && \
+    echo 'skipVerifySSL: false' >> /root/.config/kubectl-ai/config.yaml
+
 CMD ["/bin/sh"]

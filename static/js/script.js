@@ -27,6 +27,11 @@ let historyIndex = 0;
 let currentCommandAbortController = null;
 let connectionCheckInterval = null;
 
+// XTerm.js terminal instances
+let terminal = null;
+let terminalSocket = null;
+let fitAddon = null;
+
 // AI Assistant State
 let currentAiRequest = null;
 let isInAiMode = false;
@@ -99,6 +104,7 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log('🎯 DOM LOADED: History button force hidden');
     }
 });
+
 
 // Notification system
 function showNotification(message, type = 'error', duration = 4000) {
@@ -545,6 +551,18 @@ function handleExecuteCommand(e) {
         return;
     }
     
+    // Check if we're in AI mode
+    if (aiSessionActive) {
+        // Check for exit command
+        if (command.toLowerCase().trim() === 'exit' || command.toLowerCase().trim() === 'quit') {
+            exitAiSession();
+            return;
+        }
+        // Send to AI session
+        sendMessageToAi(command);
+        return;
+    }
+    
     // Execute regular command
     executeCommand(command);
 }
@@ -566,7 +584,7 @@ async function startAiSession() {
                 'Content-Type': 'application/json',
                 'X-CSRFToken': getCsrfToken()
             },
-            body: JSON.stringify({ command: 'ai' })
+            body: JSON.stringify({ command: 'kubectl-ai' })
         });
         
         const data = await response.json();
@@ -587,6 +605,80 @@ async function startAiSession() {
     } catch (error) {
         console.error('❌ Error starting AI session:', error);
         appendTerminalMessage('error', `Network error: ${error.message}`);
+    } finally {
+        setTerminalInputState(true);
+    }
+}
+
+// Send message to AI session
+async function sendMessageToAi(message) {
+    if (!currentSessionId || !aiSessionActive) {
+        appendTerminalMessage('error', '🚨 AI session not active');
+        setTerminalInputState(true);
+        return;
+    }
+    
+    console.log('🤖 Sending to AI:', message);
+    
+    try {
+        const response = await fetch(`/terminal/${currentSessionId}/execute/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
+            },
+            body: JSON.stringify({ 
+                command: message,
+                ai_mode: true 
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            if (data.ai_session_ended) {
+                aiSessionActive = false;
+                appendTerminalMessage('ai-mode-deactivated', data.output || 'AI session ended.');
+            } else {
+                appendTerminalMessage('ai-response', data.output);
+            }
+        } else {
+            appendTerminalMessage('error', data.error || 'Failed to send message to AI');
+        }
+        
+    } catch (error) {
+        console.error('❌ Error sending to AI:', error);
+        appendTerminalMessage('error', `Network error: ${error.message}`);
+    } finally {
+        setTerminalInputState(true);
+    }
+}
+
+// Exit AI session
+async function exitAiSession() {
+    if (!currentSessionId) return;
+    
+    console.log('🤖 Exiting AI session');
+    aiSessionActive = false;
+    
+    try {
+        const response = await fetch(`/terminal/${currentSessionId}/execute/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
+            },
+            body: JSON.stringify({ 
+                command: 'exit',
+                ai_mode: true 
+            })
+        });
+        
+        const data = await response.json();
+        appendTerminalMessage('ai-mode-deactivated', data.output || 'AI session ended.');
+        
+    } catch (error) {
+        console.error('❌ Error exiting AI:', error);
     } finally {
         setTerminalInputState(true);
     }
@@ -1155,14 +1247,14 @@ function appendTerminalMessage(type, content, exitCode = null, commands = [], fo
     switch (type) {
         case 'command':
             messageHTML = `
-                <div class="text-blue-300 font-mono">
-                    <span class="text-blue-400">user@k8s-terminal:~$</span> <span class="text-blue-100">${escapeHtml(content)}</span>
+                <div class="text-white font-mono">
+                    <span class="text-green-500">root@k8s-terminal:~#</span> <span class="text-white">${escapeHtml(content)}</span>
                 </div>
             `;
             break;
         
         case 'output':
-            const exitClass = exitCode === 0 ? 'text-blue-200' : 'text-red-400';
+            const exitClass = exitCode === 0 ? 'text-gray-300' : 'text-red-400';
             messageHTML = `
                 <div class="${exitClass} font-mono whitespace-pre-wrap">
                     ${escapeHtml(content)}
@@ -1572,8 +1664,8 @@ async function loadCommandHistory(sessionId) {
                     const cmdDiv = document.createElement('div');
                     cmdDiv.className = 'terminal-message mb-4';
                     cmdDiv.innerHTML = `
-                        <div class="text-blue-300 font-mono">
-                            <span class="text-blue-400">user@k8s-terminal:~$</span> <span class="text-blue-100">${escapeHtml(cmd.command)}</span>
+                        <div class="text-white font-mono">
+                            <span class="text-green-500">root@k8s-terminal:~#</span> <span class="text-white">${escapeHtml(cmd.command)}</span>
                         </div>
                     `;
                     oldHistory.appendChild(cmdDiv);
@@ -3961,6 +4053,155 @@ function updateConnectionStatus(status, sessionName) {
         sessionNameEl.textContent = `root@${sessionName || 'k8s-container'}:~#`;
     }
 }
+
+function initializeRealTerminal(sessionId) {
+    console.log('Initializing terminal for session:', sessionId);
+    
+    // Clean up existing terminal
+    if (terminal) {
+        terminal.dispose();
+    }
+    if (terminalSocket) {
+        terminalSocket.close();
+    }
+    
+    try {
+        // Create new terminal
+        terminal = new Terminal({
+            cursorBlink: true,
+            fontSize: 14,
+            fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+            theme: {
+                background: '#000000',
+                foreground: '#ffffff',
+                cursor: '#00ff00',
+                cursorAccent: '#000000',
+                selection: 'rgba(255, 255, 255, 0.3)'
+            },
+            cols: 80,
+            rows: 24
+        });
+        
+        console.log('Terminal created');
+        
+        // Create fit addon
+        fitAddon = new FitAddon.FitAddon();
+        terminal.loadAddon(fitAddon);
+        
+        // Mount terminal
+        const container = document.getElementById('terminal-container-xterm');
+        if (!container) {
+            console.error('Terminal container not found!');
+            return;
+        }
+        
+        container.innerHTML = ''; // Clear existing content
+        terminal.open(container);
+        console.log('Terminal opened in container');
+        
+        // Write initial message
+        terminal.write('Initializing terminal...\r\n');
+        
+        // Fit terminal to container
+        setTimeout(() => {
+            fitAddon.fit();
+            console.log('Terminal fitted to container');
+        }, 100);
+        
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            if (fitAddon) {
+                fitAddon.fit();
+            }
+        });
+        
+        // Connect to WebSocket
+        connectTerminalWebSocket(sessionId);
+        
+        // Focus terminal
+        terminal.focus();
+        
+    } catch (error) {
+        console.error('Error initializing terminal:', error);
+        alert('Failed to initialize terminal: ' + error.message);
+    }
+}
+
+function connectTerminalWebSocket(sessionId) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/terminal/${sessionId}/`;
+    
+    console.log('Connecting to WebSocket:', wsUrl);
+    terminal.write('Connecting to terminal...\r\n');
+    
+    terminalSocket = new WebSocket(wsUrl);
+    
+    terminalSocket.onopen = () => {
+        console.log('Terminal WebSocket connected');
+        terminal.write('\x1b[32mConnected!\x1b[0m\r\n');
+        
+        // Send terminal size
+        const dims = fitAddon.proposeDimensions();
+        if (dims) {
+            console.log('Sending terminal size:', dims);
+            terminalSocket.send(JSON.stringify({
+                type: 'resize',
+                cols: dims.cols,
+                rows: dims.rows
+            }));
+        }
+    };
+    
+    terminalSocket.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            console.log('Received message:', data.type);
+            if (data.type === 'output') {
+                terminal.write(data.data);
+            } else if (data.type === 'error') {
+                terminal.write(`\r\n\x1b[31mError: ${data.data}\x1b[0m\r\n`);
+                terminal.write(`\r\n\x1b[33mPlease refresh the page to reconnect\x1b[0m\r\n`);
+            } else if (data.type === 'keepalive') {
+                // Just ignore keepalive messages - they keep the connection alive
+                console.log('Keepalive received');
+            }
+        } catch (e) {
+            console.error('Error parsing message:', e);
+        }
+    };
+    
+    terminalSocket.onclose = (event) => {
+        console.log('Terminal WebSocket disconnected:', event.code, event.reason);
+        terminal.write('\r\n\x1b[31mConnection closed\x1b[0m\r\n');
+    };
+    
+    terminalSocket.onerror = (error) => {
+        console.error('Terminal WebSocket error:', error);
+        terminal.write('\r\n\x1b[31mConnection error - check console\x1b[0m\r\n');
+    };
+    
+    // Handle terminal input
+    terminal.onData((data) => {
+        if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
+            terminalSocket.send(JSON.stringify({
+                type: 'input',
+                data: data
+            }));
+        }
+    });
+    
+    // Handle terminal resize
+    terminal.onResize((size) => {
+        if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
+            terminalSocket.send(JSON.stringify({
+                type: 'resize',
+                cols: size.cols,
+                rows: size.rows
+            }));
+        }
+    });
+}
+
 function loadChatSession(sessionId, clusterName, clusterId) {
     console.log('🐳 Loading container session:', sessionId);
     
@@ -3973,11 +4214,9 @@ function loadChatSession(sessionId, clusterName, clusterId) {
     document.getElementById('terminal-container').style.display = 'flex';
     document.getElementById('terminal-container').classList.remove('hidden');
     
-    // Enable input
-    const terminalInput = document.getElementById('terminal-input');
-    terminalInput.disabled = false;
-    terminalInput.placeholder = 'Enter command (kubectl, kubectl-ai, ls, etc.)...';
-    terminalInput.focus();
+    // Initialize real terminal
+    initializeRealTerminal(sessionId);
+    
     
     // Load history
     loadChatHistory(sessionId);

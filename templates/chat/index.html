@@ -9,6 +9,14 @@
   {% csrf_token %}
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- xterm.js -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-attach@0.9.0/lib/xterm-addon-attach.js"></script>
+  
   <script>
     tailwind.config = {
       theme: {
@@ -84,6 +92,20 @@
     .custom-scrollbar {
       scrollbar-width: thin;
       scrollbar-color: rgba(59, 130, 246, 0.5) rgba(10, 14, 26, 0.3);
+    }
+    
+    /* XTerm.js styles */
+    #terminal-container-xterm {
+        background: #000;
+    }
+    
+    #terminal-container-xterm .xterm {
+        padding: 10px;
+        height: 100%;
+    }
+    
+    #terminal-container-xterm .xterm-viewport {
+        overflow-y: auto;
     }
     
     /* Terminal-specific scrollbar */
@@ -386,16 +408,16 @@
             </div>
           </div>
                           <!-- Terminal Interface -->
-                <div class="hidden w-full flex-1 bg-terminal-surface/95 border border-terminal-border/50 rounded-2xl shadow-2xl flex flex-col overflow-hidden backdrop-blur-sm animate-fade-in" id="terminal-container">
+                <div class="hidden w-full flex-1 bg-black border border-gray-800 rounded-lg shadow-2xl flex flex-col overflow-hidden animate-fade-in" id="terminal-container">
                     <!-- Terminal Header -->
-                    <div class="glass-effect text-terminal-text px-4 sm:px-6 py-3 sm:py-4 border-b border-terminal-border/30 font-mono text-xs sm:text-sm">
+                    <div class="bg-gray-900 text-gray-300 px-4 sm:px-6 py-2 border-b border-gray-700 font-mono text-xs">
                         <div class="flex items-center justify-between gap-2">
                             <div class="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
                                 <div class="relative flex-shrink-0">
                                     <div id="connection-indicator" class="w-3 h-3 bg-terminal-success rounded-full shadow-lg"></div>
                                     <div id="connection-ping" class="absolute inset-0 w-3 h-3 bg-terminal-success rounded-full animate-ping opacity-75"></div>
                                 </div>
-                                <span id="current-session-name" class="text-terminal-text font-medium truncate hidden sm:inline">user@k8s-terminal:~$</span>
+                                <span id="current-session-name" class="text-gray-300 font-medium truncate hidden sm:inline">Terminal Session</span>
                                 <div id="connection-status" class="flex items-center gap-1 sm:gap-2 text-xs">
                                     <span id="connection-text" class="text-terminal-success font-medium">Connected</span>
                                     <button onclick="testConnectionCheck()" class="ml-1 text-terminal-text/50 hover:text-terminal-accent transition-colors duration-200 flex-shrink-0" title="Refresh connection status">
@@ -419,63 +441,10 @@
                         </div>
                     </div>
                     
-                    <!-- Terminal Output -->
-                    <div id="terminal-messages" class="relative flex-1 bg-gradient-to-b from-terminal-bg/40 to-terminal-surface/20 text-terminal-text p-3 sm:p-4 lg:p-6 space-y-1 sm:space-y-2 overflow-y-auto font-mono text-xs sm:text-sm backdrop-blur-sm terminal-scrollbar" style="min-height: 300px; max-height: calc(100vh - 200px);">
-                        <!-- Old history container -->
-                        <div id="old-history" class="hidden border-b border-terminal-border/40 pb-4 sm:pb-6 mb-4 sm:mb-6 opacity-80">
-                            <!-- Old terminal messages will appear here -->
-                        </div>
-                        <!-- Current session messages -->
-                        <div id="current-session">
-                            <!-- New terminal messages will appear here -->
-                        </div>
+                    <!-- Real Terminal -->
+                    <div id="terminal-container-xterm" class="relative flex-1 bg-black p-2" style="min-height: 500px; height: calc(100vh - 200px);">
+                        <!-- XTerm.js terminal will be mounted here -->
                     </div>
-                    
-                    <!-- Terminal Input -->
-                    <div class="glass-effect border-t border-terminal-border/30 p-3 sm:p-4 lg:p-6">
-                        <!-- Input Form -->
-                        <form id="terminal-form" class="flex items-center gap-2 sm:gap-4 relative">
-                            <!-- Terminal Mode Prompt -->
-                            <span id="terminal-prompt" class="text-terminal-accent font-mono font-semibold text-xs sm:text-sm truncate flex-shrink-0">user@k8s-terminal:~$</span>
-                            
-                            <input 
-                                type="text" 
-                                id="terminal-input"
-                                class="flex-1 bg-transparent text-terminal-text font-mono outline-none caret-terminal-accent border-none placeholder-terminal-text/40 text-xs sm:text-sm min-w-0 transition-all duration-300"
-                                placeholder="Enter your command..."
-                                disabled
-                            >
-                            
-                            <!-- AI Assistant Button -->
-                            <button type="button" id="ai-assist-btn" class="hidden flex items-center gap-2 px-3 py-2 bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/30 hover:border-purple-500/50 rounded-lg text-xs text-purple-200 transition-all duration-200 hover:scale-105 flex-shrink-0" title="Ask AI Assistant">
-                                <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-                                </svg>
-                                <span>AI</span>
-                            </button>
-                            
-                            <button type="submit" id="terminal-submit" class="hidden"></button>
-                        </form>
-                        
-                        <!-- Help Text -->
-                        <div class="mt-2 sm:mt-3 text-xs text-terminal-text/60 flex flex-wrap gap-2 sm:gap-4 transition-all duration-300">
-                          <span class="flex items-center gap-1" id="help-arrow-keys">
-                              <span class="text-terminal-accent">↑↓</span> <span class="hidden sm:inline">Command</span> History
-                          </span>
-                          <span class="flex items-center gap-1" id="help-interrupt">
-                              <span class="text-terminal-accent">Ctrl+C</span> Interrupt
-                          </span>
-                          <span class="flex items-center gap-1 hidden sm:flex" id="help-editing">
-                              <span class="text-terminal-accent">vim/nano</span> Text editing
-                          </span>
-                          <span class="flex items-center gap-1" id="help-kubectl-ai">
-                              <span class="text-purple-400">kubectl-ai</span> AI Commands
-                          </span>
-                          <span class="flex items-center gap-1" id="container-status-help">
-                              <span class="text-blue-400">🐳</span> Container Terminal
-                          </span>
-                      </div>
-                  </div>
                   
                     </div>
                 </div>

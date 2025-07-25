@@ -1,0 +1,257 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block extra_head %}
+<!-- xterm.js -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+
+<style>
+    .terminal-wrapper {
+        height: calc(100vh - 100px);
+        display: flex;
+        flex-direction: column;
+    }
+    
+    #real-terminal {
+        flex: 1;
+        background: #000;
+    }
+    
+    .xterm {
+        height: 100%;
+        padding: 10px;
+    }
+    
+    .cluster-selector {
+        background: #1a1a2e;
+        padding: 1rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="min-h-screen bg-terminal-bg text-terminal-text">
+    <!-- Header -->
+    <header class="bg-terminal-surface/90 backdrop-blur-md border-b border-terminal-border/50 sticky top-0 z-50">
+        <div class="container mx-auto px-4 py-3">
+            <div class="flex items-center justify-between">
+                <h1 class="text-xl font-bold text-terminal-accent flex items-center">
+                    <span class="text-2xl mr-2">🐳</span>
+                    K8S Terminal AI
+                </h1>
+                
+                <!-- Cluster Selector -->
+                <div class="cluster-selector">
+                    <select id="cluster-select" class="bg-terminal-surface text-terminal-text px-4 py-2 rounded border border-terminal-border">
+                        <option value="">Select a cluster...</option>
+                        {% for cluster in clusters %}
+                        <option value="{{ cluster.id }}" data-session-id="{{ cluster.latest_session.session_id }}">
+                            {{ cluster.name }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="container mx-auto px-4 py-4">
+        <!-- Welcome Message -->
+        <div id="welcome-message" class="text-center py-20">
+            <h2 class="text-2xl font-bold mb-4">Welcome to K8S Terminal AI</h2>
+            <p class="text-terminal-text/70 mb-8">Select a cluster to start your terminal session</p>
+            <div class="text-terminal-text/50">
+                <p>• Full terminal access to your Kubernetes cluster</p>
+                <p>• Run kubectl, kubectl-ai, vim, and any other commands</p>
+                <p>• Real-time interactive terminal just like SSH</p>
+            </div>
+        </div>
+
+        <!-- Terminal Container -->
+        <div id="terminal-container" class="hidden terminal-wrapper">
+            <div id="real-terminal"></div>
+        </div>
+    </main>
+</div>
+
+<script>
+// Global variables
+let terminal = null;
+let fitAddon = null;
+let socket = null;
+let currentSessionId = null;
+
+// Initialize terminal
+function initTerminal() {
+    terminal = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+        theme: {
+            background: '#000000',
+            foreground: '#ffffff',
+            cursor: '#ffffff',
+            selection: '#ffffff40',
+            black: '#000000',
+            red: '#ff5555',
+            green: '#50fa7b',
+            yellow: '#f1fa8c',
+            blue: '#bd93f9',
+            magenta: '#ff79c6',
+            cyan: '#8be9fd',
+            white: '#bbbbbb',
+            brightBlack: '#555555',
+            brightRed: '#ff5555',
+            brightGreen: '#50fa7b',
+            brightYellow: '#f1fa8c',
+            brightBlue: '#bd93f9',
+            brightMagenta: '#ff79c6',
+            brightCyan: '#8be9fd',
+            brightWhite: '#ffffff'
+        },
+        scrollback: 10000,
+        convertEol: true
+    });
+    
+    // Load addons
+    fitAddon = new FitAddon.FitAddon();
+    terminal.loadAddon(fitAddon);
+    
+    const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+    terminal.loadAddon(webLinksAddon);
+}
+
+// Connect to WebSocket
+function connectWebSocket(sessionId) {
+    if (socket) {
+        socket.close();
+    }
+    
+    const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsUrl = `${wsScheme}://${window.location.host}/ws/terminal/${sessionId}/`;
+    
+    socket = new WebSocket(wsUrl);
+    
+    socket.onopen = (event) => {
+        console.log('WebSocket connected');
+        terminal.writeln('\x1b[32m✓ Connected to container\x1b[0m');
+        terminal.writeln('');
+        terminal.focus();
+    };
+    
+    socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'output') {
+            terminal.write(data.data);
+        } else if (data.type === 'error') {
+            terminal.writeln(`\x1b[31m${data.data}\x1b[0m`);
+        }
+    };
+    
+    socket.onclose = (event) => {
+        console.log('WebSocket disconnected');
+        terminal.writeln('\x1b[31m\n✗ Disconnected from container\x1b[0m');
+        // Try to reconnect after 3 seconds
+        setTimeout(() => {
+            if (currentSessionId === sessionId) {
+                connectWebSocket(sessionId);
+            }
+        }, 3000);
+    };
+    
+    socket.onerror = (error) => {
+        console.error('WebSocket error:', error);
+    };
+}
+
+// Handle terminal input
+function setupTerminalInput() {
+    terminal.onData((data) => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+                type: 'input',
+                data: data
+            }));
+        }
+    });
+}
+
+// Handle window resize
+function setupResize() {
+    window.addEventListener('resize', () => {
+        if (fitAddon) {
+            fitAddon.fit();
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({
+                    type: 'resize',
+                    rows: terminal.rows,
+                    cols: terminal.cols
+                }));
+            }
+        }
+    });
+}
+
+// Load terminal session
+function loadTerminalSession(sessionId) {
+    currentSessionId = sessionId;
+    
+    // Hide welcome message
+    document.getElementById('welcome-message').classList.add('hidden');
+    
+    // Show terminal container
+    document.getElementById('terminal-container').classList.remove('hidden');
+    
+    // Clear and reinitialize terminal if needed
+    if (!terminal) {
+        initTerminal();
+    } else {
+        terminal.clear();
+    }
+    
+    // Open terminal in DOM
+    const terminalElement = document.getElementById('real-terminal');
+    terminalElement.innerHTML = '';
+    terminal.open(terminalElement);
+    
+    // Fit terminal to container
+    setTimeout(() => {
+        fitAddon.fit();
+    }, 100);
+    
+    // Setup input handler
+    setupTerminalInput();
+    
+    // Connect WebSocket
+    connectWebSocket(sessionId);
+}
+
+// Handle cluster selection
+document.getElementById('cluster-select').addEventListener('change', function(e) {
+    const selectedOption = e.target.options[e.target.selectedIndex];
+    const sessionId = selectedOption.dataset.sessionId;
+    
+    if (sessionId) {
+        loadTerminalSession(sessionId);
+    }
+});
+
+// Setup resize handler
+setupResize();
+
+// Auto-load if there's only one cluster
+window.addEventListener('load', () => {
+    const clusterSelect = document.getElementById('cluster-select');
+    if (clusterSelect.options.length === 2) { // One default + one cluster
+        clusterSelect.selectedIndex = 1;
+        clusterSelect.dispatchEvent(new Event('change'));
+    }
+});
+</script>
+{% endblock %}

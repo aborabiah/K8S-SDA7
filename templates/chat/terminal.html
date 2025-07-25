@@ -1,0 +1,175 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block extra_head %}
+<!-- xterm.js -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+
+<style>
+    #terminal-container {
+        height: calc(100vh - 200px);
+        background-color: #1a1a2e;
+        padding: 10px;
+        border-radius: 8px;
+    }
+    
+    .terminal-header {
+        background-color: #0f0f23;
+        padding: 10px 20px;
+        border-radius: 8px 8px 0 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    
+    .terminal-body {
+        background-color: #000;
+        height: 100%;
+        border-radius: 0 0 8px 8px;
+        overflow: hidden;
+    }
+    
+    #terminal {
+        height: 100%;
+        width: 100%;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container mx-auto px-4 py-6">
+    <div class="terminal-header">
+        <h2 class="text-xl font-bold text-white flex items-center">
+            <span class="text-2xl mr-2">🐳</span>
+            {{ cluster_name }} Terminal
+        </h2>
+        <div class="flex items-center space-x-4">
+            <span class="text-sm text-gray-400">Session: {{ session_id|slice:":8" }}</span>
+            <button onclick="window.location.href='/'" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-white">
+                Back to Chat
+            </button>
+        </div>
+    </div>
+    
+    <div id="terminal-container">
+        <div class="terminal-body">
+            <div id="terminal"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const sessionId = "{{ session_id }}";
+    const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsUrl = `${wsScheme}://${window.location.host}/ws/terminal/${sessionId}/`;
+    
+    // Initialize terminal
+    const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+        theme: {
+            background: '#000000',
+            foreground: '#ffffff',
+            cursor: '#ffffff',
+            selection: '#ffffff40',
+            black: '#000000',
+            red: '#ff5555',
+            green: '#50fa7b',
+            yellow: '#f1fa8c',
+            blue: '#bd93f9',
+            magenta: '#ff79c6',
+            cyan: '#8be9fd',
+            white: '#bbbbbb',
+            brightBlack: '#555555',
+            brightRed: '#ff5555',
+            brightGreen: '#50fa7b',
+            brightYellow: '#f1fa8c',
+            brightBlue: '#bd93f9',
+            brightMagenta: '#ff79c6',
+            brightCyan: '#8be9fd',
+            brightWhite: '#ffffff'
+        },
+        scrollback: 10000,
+        convertEol: true
+    });
+    
+    // Fit addon
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    
+    // Web links addon
+    const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+    term.loadAddon(webLinksAddon);
+    
+    // Open terminal
+    term.open(document.getElementById('terminal'));
+    fitAddon.fit();
+    
+    // WebSocket connection
+    let socket = null;
+    
+    function connectWebSocket() {
+        socket = new WebSocket(wsUrl);
+        
+        socket.onopen = (event) => {
+            console.log('WebSocket connected');
+            term.writeln('\x1b[32m✓ Connected to container\x1b[0m');
+            term.focus();
+        };
+        
+        socket.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'output') {
+                term.write(data.data);
+            } else if (data.type === 'error') {
+                term.writeln(`\x1b[31m${data.data}\x1b[0m`);
+            }
+        };
+        
+        socket.onclose = (event) => {
+            console.log('WebSocket disconnected');
+            term.writeln('\x1b[31m\n✗ Disconnected from container\x1b[0m');
+            // Try to reconnect after 3 seconds
+            setTimeout(connectWebSocket, 3000);
+        };
+        
+        socket.onerror = (error) => {
+            console.error('WebSocket error:', error);
+        };
+    }
+    
+    // Handle terminal input
+    term.onData((data) => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+                type: 'input',
+                data: data
+            }));
+        }
+    });
+    
+    // Handle window resize
+    window.addEventListener('resize', () => {
+        fitAddon.fit();
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+                type: 'resize',
+                rows: term.rows,
+                cols: term.cols
+            }));
+        }
+    });
+    
+    // Connect WebSocket
+    connectWebSocket();
+    
+    // Focus terminal on load
+    window.addEventListener('load', () => {
+        term.focus();
+    });
+</script>
+{% endblock %}
